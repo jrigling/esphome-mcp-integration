@@ -1,0 +1,13 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Set up ESPHome MCP Bridge",
+        "description": "This exposes the **ESPHome Builder** LLM API to AI agents through Home Assistant's MCP server, covering the full ESPHome development cycle (inventory, read/write YAML, validate, compile, upload, run, logs).\n\nAn ESPHome dashboard add-on (stable, beta, or dev) must be installed. There is nothing to configure - select **Submit** to enable it."
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "ESPHome MCP Bridge is already configured. Only one instance is needed."
+    }
+  }
+}

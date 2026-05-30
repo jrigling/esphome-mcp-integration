@@ -31,7 +31,7 @@ Tests use `aioresponses` to mock HTTP; they cover the client library only (no HA
 - `supervisor.py` — `SupervisorClient`: discovers ESPHome add-ons via `GET /addons` (matches any slug/name containing `esphome`), ranks them stable > beta > dev (running preferred), and resolves each add-on's internal dashboard base URL (`http://<hostname>:<ingress_port>`) from `GET /addons/{slug}/info`. Falls back to port 6052.
 - `dashboard.py` — `DashboardClient`: talks the **legacy** ESPHome dashboard protocol (supported by both the classic dashboard and the new Device Builder). REST for `/devices`, `/ping`, `/edit`, `/json-config`; WebSocket "spawn" protocol for `/compile|/validate|/clean|/upload|/run|/logs`.
 
-The integration's `llm.py` wraps the client in `llm.Tool` subclasses and registers `ESPHomeBuilderAPI` in `async_setup`.
+The integration's `llm.py` wraps the client in `llm.Tool` subclasses. `async_setup_entry` registers `ESPHomeBuilderAPI` and ties the returned unregister callback to the entry via `entry.async_on_unload`. Installation is UI-only: a confirm-only, single-instance config flow (`config_flow.py`) — there is no YAML setup and no `async_setup`.
 
 ## Critical protocol facts (verified against ESPHome + Device Builder source)
 

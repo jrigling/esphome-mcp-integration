@@ -71,18 +71,17 @@ from the Supervisor, so it adapts automatically rather than hard-coding a URL.
 
 1. Add this repository as a custom HACS repository (type: *Integration*).
 2. Install **ESPHome MCP Bridge** and restart Home Assistant.
-3. Add to `configuration.yaml`:
-   ```yaml
-   esphome_mcp_bridge:
-   ```
-4. Restart. The `ESPHome Builder` API appears in the LLM/Assist API selector
-   and to MCP clients.
+3. Go to **Settings → Devices & Services → Add Integration**, search for
+   **ESPHome MCP Bridge**, and select **Submit**. There's nothing to
+   configure — it's a single-instance, confirm-only setup.
+4. The `ESPHome Builder` API now appears in the LLM/Assist API selector and to
+   MCP clients.
 
 ### Manual
 
 Copy `custom_components/esphome_mcp_bridge/` into your HA
-`config/custom_components/`, add `esphome_mcp_bridge:` to `configuration.yaml`,
-and restart.
+`config/custom_components/`, restart, then add it from **Settings → Devices &
+Services → Add Integration** as above.
 
 > Home Assistant installs the `esphome-mcp-client` PyPI dependency
 > automatically (declared in the integration manifest).
