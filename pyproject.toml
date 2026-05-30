@@ -1,0 +1,83 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "esphome-mcp-client"
+version = "0.1.0"
+description = "Async client for the Home Assistant Supervisor and ESPHome dashboard / Device Builder API"
+readme = "README.md"
+license = "MIT"
+authors = [
+    {name = "Justin Rigling", email = "jrigling@gmail.com"}
+]
+requires-python = ">=3.11"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Home Automation",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+keywords = ["esphome", "home-assistant", "mcp", "device-builder", "iot"]
+dependencies = [
+    "aiohttp>=3.9.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/jrigling/esphome-mcp-integration"
+Repository = "https://github.com/jrigling/esphome-mcp-integration"
+Issues = "https://github.com/jrigling/esphome-mcp-integration/issues"
+Documentation = "https://github.com/jrigling/esphome-mcp-integration#readme"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-cov>=4.0",
+    "aioresponses>=0.7.6",
+    "black>=23.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0",
+]
+build = [
+    "build>=0.10.0",
+    "twine>=4.0.0",
+]
+
+[tool.setuptools]
+packages = ["esphome_mcp_client"]
+
+[tool.setuptools.package-data]
+esphome_mcp_client = ["py.typed"]
+
+[tool.black]
+line-length = 100
+target-version = ["py311", "py312"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "C4", "UP"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+check_untyped_defs = true

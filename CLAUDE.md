@@ -4,44 +4,56 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-A Home Assistant Custom Integration (domain: `esphome_mcp_bridge`) that registers a custom LLM API. The API exposes tools for AI agents (connecting via HA's MCP Server) to read/write ESPHome YAML configs and trigger compilation via the ESPHome Add-on.
+Two deliverables from one repo, mirroring the `python-jebao` / `homeassistant-jebao` split:
 
-No config flow, no entities, no UI — this integration purely registers an `llm.API` on startup via `async_setup`.
+1. **`esphome_mcp_client/`** — a pure-Python async transport library (no Home Assistant imports), published to PyPI as **`esphome-mcp-client`**.
+2. **`custom_components/esphome_mcp_bridge/`** — a Home Assistant custom integration (domain `esphome_mcp_bridge`) that registers a custom LLM API. It depends on the client via `manifest.json` `requirements` (exact `==` pin).
 
-## Key Files
+The integration exposes a full ESPHome dev cycle to AI agents via HA's MCP server: discover add-ons → inventory devices → read/create/write YAML → validate → compile → upload/run → logs → clean.
 
-- `custom_components/esphome_mcp_bridge/manifest.json` — HA integration manifest; depends on `hassio`
-- `custom_components/esphome_mcp_bridge/__init__.py` — calls `llm.async_register_api(hass, ESPHomeBuilderAPI(hass))` in `async_setup`
-- `custom_components/esphome_mcp_bridge/llm.py` — all tool and API classes
+## Commands
 
-## HA LLM API Pattern
-
-Tools subclass `llm.Tool` and pass `name`, `description`, `parameters` to `super().__init__()` (Tool is a dataclass in HA 2024+). The `async_call` signature is:
-
-```python
-async def async_call(self, hass, tool_input: llm.ToolInput, llm_context: llm.LLMContext) -> dict
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"              # install client lib + dev tooling
+ruff check esphome_mcp_client tests  # lint
+pytest                               # run all tests
+pytest tests/test_dashboard.py -k inventory   # single test
+python -m build && twine check dist/*         # verify packaging
 ```
 
-`tool_input.tool_args` holds the validated dict of arguments.
+Tests use `aioresponses` to mock HTTP; they cover the client library only (no HA test harness here).
 
-The custom API class subclasses `llm.API` and implements `async_get_api_instance`, which returns an `llm.APIInstance` with the tool list and a system prompt string.
+## Architecture
 
-## Security Invariants
+`esphome_mcp_client` is transport-only and HA-agnostic so it can be unit-tested and reused:
 
-These must not be weakened:
-- `_sanitize_filename()` in `llm.py` blocks `..`, `/`, and `\` in filenames before any file I/O
-- `secrets.yaml` is in `BLOCKED_FILES` — blocked from read, write, and compile
-- Only `.yaml`/`.yml` extensions are accepted for writes
-- File operations are always joined to `ESPHOME_CONFIG_DIR` (`/config/esphome`)
+- `supervisor.py` — `SupervisorClient`: discovers ESPHome add-ons via `GET /addons` (matches any slug/name containing `esphome`), ranks them stable > beta > dev (running preferred), and resolves each add-on's internal dashboard base URL (`http://<hostname>:<ingress_port>`) from `GET /addons/{slug}/info`. Falls back to port 6052.
+- `dashboard.py` — `DashboardClient`: talks the **legacy** ESPHome dashboard protocol (supported by both the classic dashboard and the new Device Builder). REST for `/devices`, `/ping`, `/edit`, `/json-config`; WebSocket "spawn" protocol for `/compile|/validate|/clean|/upload|/run|/logs`.
 
-## Supervisor API Call
+The integration's `llm.py` wraps the client in `llm.Tool` subclasses and registers `ESPHomeBuilderAPI` in `async_setup`.
 
-The compile tool POSTs to `ESPHOME_JOBS_URL` with `Authorization: Bearer $SUPERVISOR_TOKEN`. The token is read at call time via `os.environ.get("SUPERVISOR_TOKEN")` — never stored. Uses `async_get_clientsession(hass)` (HA's shared aiohttp session) rather than creating a new session.
+## Critical protocol facts (verified against ESPHome + Device Builder source)
 
-## Installation for Testing
+- There is **no `/api/v1/jobs` REST endpoint** (an early spec assumed one). Compile/logs/etc. are **WebSocket**, spawn protocol:
+  - client → `{"type": "spawn", "configuration": "x.yaml", "port": "OTA"}`
+  - server → `{"event": "line", "data": "<chunk>"}` repeated, then `{"event": "exit", "code": <int>}`
+- `/logs` never sends an `exit` frame for a healthy device, so `DashboardClient.logs()` is bounded by `max_seconds` / `max_lines` and sets `truncated`.
+- ESPHome add-on slugs: `5c53de3b_esphome` (stable), `5c53de3b_esphome-beta`, `5c53de3b_esphome-dev`. Discovery matches the `esphome` substring rather than hard-coding the repo hash.
 
-Copy `custom_components/esphome_mcp_bridge/` into a running HA instance's `config/custom_components/`, add `esphome_mcp_bridge:` to `configuration.yaml`, and restart. The `ESPHome Builder` API then appears in HA's LLM API selector.
+## HA LLM API contract (verified against HA `helpers/llm.py`)
 
-## Version
+- `llm.Tool` is a **plain class** — set `name` / `description` / `parameters` (a `vol.Schema`) as **class attributes**; do NOT call `super().__init__`. Implement `async_call(self, hass, tool_input, llm_context) -> dict`. Args are in `tool_input.tool_args`.
+- `llm.API` is a `@dataclass(slots=True, kw_only=True)` with `hass`/`id`/`name`; subclass calls `super().__init__(hass=..., id=..., name=...)` and implements `async_get_api_instance` returning an `llm.APIInstance(api, api_prompt, llm_context, tools)`.
 
-Current: `0.1.0` in `manifest.json`. Follow semver; bump for any user-visible change.
+## Security invariants (do not weaken)
+
+In `llm.py`: `_sanitize_filename()` rejects `..`, `/`, `\`; `_guard()` blocks `secrets.yaml`/`secrets.yml` and (for writes/builds) enforces `.yaml`/`.yml`. File tools are always joined under `ESPHOME_CONFIG_DIR` (`/config/esphome`). Supervisor auth uses `os.environ["SUPERVISOR_TOKEN"]` read at call time — never stored.
+
+## Releasing
+
+See [PYPI_SETUP.md](PYPI_SETUP.md). Bump `pyproject.toml` `version` + `esphome_mcp_client/__init__.py` `__version__` together; if the integration needs the new client, bump the `manifest.json` requirement pin and integration `version` too. A GitHub Release triggers `publish.yml`.
+
+## Networking caveat
+
+The dashboard base URL relies on the add-on being reachable by its Supervisor-reported `hostname:ingress_port` from the HA Core container. If an ESPHome add-on runs on host networking, this may need adjustment — verify at runtime against a real install.

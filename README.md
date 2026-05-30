@@ -1,64 +1,118 @@
 # ESPHome MCP Bridge
 
-A Home Assistant Custom Integration that registers a custom LLM API, exposing tools that allow AI agents (such as Claude connecting via the official HA MCP Server) to interact with the local ESPHome Add-on.
+Drive a **full ESPHome development cycle from an AI agent** (e.g. Claude Code
+via Home Assistant's MCP server). This repo ships a Home Assistant custom
+integration that registers a custom LLM API exposing ESPHome tools, backed by a
+small reusable PyPI client library.
 
-## How It Works
+```
+AI agent ── MCP ──► Home Assistant ──► ESPHome Builder LLM API
+                                          │
+                          ┌───────────────┴───────────────┐
+                          ▼                                ▼
+                 /config/esphome (files)        ESPHome dashboard add-on
+                                                (stable / beta / dev) via
+                                                Supervisor internal network
+```
 
-This integration runs entirely inside Home Assistant Core, which gives it:
+## Why this works without sidecars
 
-- **Native filesystem access** to `/config/esphome` to read and write YAML files.
-- **Internal HTTP access** to the ESPHome Add-on via the Supervisor network proxy, without requiring external port exposure.
+The integration runs **inside Home Assistant Core**, so it has:
 
-It registers a custom `ESPHome Builder` API with Home Assistant's LLM system. When an AI agent connects via the HA MCP Server and selects this API, it gains access to three tools:
+- **Native filesystem access** to `/config/esphome` for reading, creating, and
+  writing YAML — reliable and independent of which add-on is installed.
+- **Internal network access** to the ESPHome dashboard add-on through the
+  Supervisor, reaching the dashboard's container directly (no ingress auth, no
+  exposed ports) for validate / compile / upload / run / logs.
 
-| Tool | Description |
-|------|-------------|
-| `esphome_read_yaml` | Read an ESPHome YAML config file |
-| `esphome_write_yaml` | Write or overwrite an ESPHome YAML config file |
-| `esphome_compile` | Trigger compilation of a config via the ESPHome Add-on |
+No changes to the ESPHome add-on and no external containers required.
+
+## The development-cycle tools
+
+The `ESPHome Builder` LLM API exposes these tools:
+
+| Tool | Purpose |
+|------|---------|
+| `esphome_list_addons` | Discover installed ESPHome channels (stable/beta/dev), versions, state |
+| `esphome_list_devices` | Inventory devices: name, version, platform, integrations, **online** status |
+| `esphome_read_yaml` | Read a config from `/config/esphome` |
+| `esphome_create_config` | Create a **new** config (fails if it exists) |
+| `esphome_write_yaml` | Overwrite an existing config |
+| `esphome_validate` | Validate a config without building |
+| `esphome_compile` | Compile firmware (runs to completion, returns log + exit code) |
+| `esphome_upload` | Flash firmware to a device (`port` defaults to `OTA`) |
+| `esphome_run` | Compile **and** flash in one step (dashboard "Install") |
+| `esphome_logs` | Capture a bounded window of live device logs for debugging |
+| `esphome_clean` | Remove cached build artifacts |
+
+A typical agent flow: **list devices → read/create config → write → validate →
+compile → run → check logs**.
+
+Each build tool accepts an optional `addon_slug` to target a specific channel;
+omit it to use the default (stable preferred over beta over dev).
+
+## Multi-channel discovery
+
+`esphome_list_addons` queries the Supervisor for every installed add-on whose
+slug or name matches `esphome` (`5c53de3b_esphome`, `…_esphome-beta`,
+`…_esphome-dev`). The bridge resolves each add-on's internal hostname and port
+from the Supervisor, so it adapts automatically rather than hard-coding a URL.
 
 ## Requirements
 
 - Home Assistant with the Supervisor (HA OS or Supervised install)
-- ESPHome Add-on installed (slug: `5c53de3b_esphome`)
-- Home Assistant 2024.4.0 or newer
+- An ESPHome dashboard add-on installed (classic dashboard **or** the new
+  Device Builder — both speak the protocol this bridge uses)
+- Home Assistant 2024.4.0+ (LLM API helpers)
 
 ## Installation
 
-### HACS
+### HACS (integration)
 
-1. Add this repository as a custom HACS repository (Integration type).
-2. Install **ESPHome MCP Bridge**.
-3. Restart Home Assistant.
+1. Add this repository as a custom HACS repository (type: *Integration*).
+2. Install **ESPHome MCP Bridge** and restart Home Assistant.
+3. Add to `configuration.yaml`:
+   ```yaml
+   esphome_mcp_bridge:
+   ```
+4. Restart. The `ESPHome Builder` API appears in the LLM/Assist API selector
+   and to MCP clients.
 
 ### Manual
 
-Copy the `custom_components/esphome_mcp_bridge/` directory into your HA `config/custom_components/` folder, then restart.
+Copy `custom_components/esphome_mcp_bridge/` into your HA
+`config/custom_components/`, add `esphome_mcp_bridge:` to `configuration.yaml`,
+and restart.
 
-## Configuration
-
-Add the following to your `configuration.yaml`:
-
-```yaml
-esphome_mcp_bridge:
-```
-
-Restart Home Assistant. The `ESPHome Builder` API will appear in the LLM API selector.
+> Home Assistant installs the `esphome-mcp-client` PyPI dependency
+> automatically (declared in the integration manifest).
 
 ## Security
 
-- All file operations are restricted to `/config/esphome`.
-- Directory traversal sequences (`../`) are blocked.
-- `secrets.yaml` cannot be read, written, or compiled.
-- Only `.yaml` and `.yml` files may be written.
-- Compilation requests use the Supervisor token injected at runtime — no credentials are stored in the integration.
+- File tools are confined to `/config/esphome`; directory traversal (`..`, `/`,
+  `\`) is rejected outright.
+- `secrets.yaml` / `secrets.yml` are blocked from read, write, create, and build.
+- Writes/creates accept only `.yaml` / `.yml`.
+- Supervisor requests use the `SUPERVISOR_TOKEN` injected at runtime — no
+  credentials are stored.
 
-## Architecture
+## Repository layout
 
+- `esphome_mcp_client/` — reusable async transport library → published to PyPI
+  as **`esphome-mcp-client`** (see [PYPI_SETUP.md](PYPI_SETUP.md)).
+- `custom_components/esphome_mcp_bridge/` — the Home Assistant integration
+  (LLM tool definitions + API registration).
+- `tests/` — unit tests for the client library.
+
+## Development
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+ruff check esphome_mcp_client tests
+pytest
 ```
-HA MCP Server  ──►  ESPHome Builder LLM API  ──►  /config/esphome (filesystem)
-                           │
-                           └──►  ESPHome Add-on (via Supervisor HTTP proxy)
-```
 
-The integration has no config flow and no entities. It purely registers an `llm.API` instance on startup.
+## License
+
+MIT © Justin Rigling
