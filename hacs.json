@@ -1,0 +1,7 @@
+{
+  "name": "ESPHome MCP Bridge",
+  "render_readme": true,
+  "domains": ["esphome_mcp_bridge"],
+  "iot_class": "Local Polling",
+  "homeassistant": "2024.4.0"
+}
