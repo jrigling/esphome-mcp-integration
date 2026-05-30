@@ -1,5 +1,8 @@
 # ESPHome MCP Bridge
 
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=jrigling&repository=esphome-mcp-integration&category=integration)
+[![Open your Home Assistant instance and start setting up a new integration.](https://my.home-assistant.io/badges/config_flow_start.svg)](https://my.home-assistant.io/redirect/config_flow_start/?domain=esphome_mcp_bridge)
+
 Drive a **full ESPHome development cycle from an AI agent** (e.g. Claude Code
 via Home Assistant's MCP server). This repo ships a Home Assistant custom
 integration that registers a custom LLM API exposing ESPHome tools, backed by a
@@ -69,11 +72,17 @@ from the Supervisor, so it adapts automatically rather than hard-coding a URL.
 
 ### HACS (integration)
 
-1. Add this repository as a custom HACS repository (type: *Integration*).
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=jrigling&repository=esphome-mcp-integration&category=integration)
+
+1. Click the badge above (or add this repository as a custom HACS repository,
+   type *Integration*).
 2. Install **ESPHome MCP Bridge** and restart Home Assistant.
-3. Go to **Settings → Devices & Services → Add Integration**, search for
-   **ESPHome MCP Bridge**, and select **Submit**. There's nothing to
-   configure — it's a single-instance, confirm-only setup.
+3. Add the integration — click the badge below, or go to **Settings → Devices &
+   Services → Add Integration**, search **ESPHome MCP Bridge**, and select
+   **Submit**. There's nothing to configure — it's a single-instance,
+   confirm-only setup.
+
+   [![Open your Home Assistant instance and start setting up a new integration.](https://my.home-assistant.io/badges/config_flow_start.svg)](https://my.home-assistant.io/redirect/config_flow_start/?domain=esphome_mcp_bridge)
 4. The `ESPHome Builder` API now appears in the LLM/Assist API selector and to
    MCP clients.
 
