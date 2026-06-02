@@ -45,27 +45,44 @@ The [`publish.yml`](.github/workflows/publish.yml) workflow reads this secret.
 
 ---
 
-## Releasing a new version
+## Two independent release lines (important)
 
-1. **Bump the version in two or three places so they agree:**
-   - `pyproject.toml` → `version`
-   - `esphome_mcp_client/__init__.py` → `__version__`
-   - If the integration needs the new client, also bump
-     `custom_components/esphome_mcp_bridge/manifest.json` →
-     `requirements` pin **and** its own `version`.
+This repo ships two things with **separate version lines**, and they use
+**different release mechanisms** so they don't collide:
 
-2. **Commit and push** to `main`. The `test-build` workflow lints, tests, and
-   does a trial build on every push/PR.
+| Deliverable | Versioned in | Released by | Consumed by |
+|---|---|---|---|
+| `esphome-mcp-client` (PyPI) | `pyproject.toml` + `esphome_mcp_client/__init__.py` | pushing a **`client-v*` tag** (or manual workflow run) | the integration's `manifest.json` requirement |
+| `esphome_mcp_bridge` (HACS integration) | `custom_components/esphome_mcp_bridge/manifest.json` → `version` | a **GitHub Release** (`vX.Y.Z` tag) | HACS users |
 
-3. **Create a GitHub Release** (Releases → Draft a new release):
-   - Tag: `v0.1.0` (match the version)
-   - Publish.
+> **Why:** HACS installs the latest *GitHub Release*. If GitHub Releases also
+> triggered the PyPI publish (the original setup), every integration release
+> would re-run the publish — and, worse, a library release would show up in
+> HACS as the integration version. Keeping PyPI on `client-v*` tags and HACS on
+> `vX.Y.Z` Releases separates them cleanly.
 
-   Publishing the release triggers [`publish.yml`](.github/workflows/publish.yml),
-   which builds the sdist + wheel, runs `twine check`, and uploads to PyPI.
-   You can also run it manually via **Actions → Publish to PyPI → Run workflow**.
+### Releasing the PyPI client library
 
-4. **Verify:** `pip install esphome-mcp-client==<new version>` once it appears.
+1. Bump `pyproject.toml` `version` **and** `esphome_mcp_client/__init__.py`
+   `__version__` so they agree. Commit + push to `main`.
+2. Tag and push:
+   ```bash
+   git tag client-v0.1.1 && git push origin client-v0.1.1
+   ```
+   This triggers [`publish.yml`](.github/workflows/publish.yml) (build →
+   `twine check` → `twine upload --skip-existing`). You can also run it manually
+   via **Actions → Publish to PyPI → Run workflow**.
+3. **Verify:** `pip install esphome-mcp-client==<new version>`.
+4. If the integration needs the new client, bump its `manifest.json`
+   `requirements` pin and cut an integration release (below).
+
+### Releasing the HACS integration
+
+1. Bump `custom_components/esphome_mcp_bridge/manifest.json` → `version`.
+   Commit + push to `main`.
+2. **Create a GitHub Release** (Releases → Draft a new release): tag `vX.Y.Z`
+   matching the manifest version, target `main`, publish. This does **not**
+   trigger the PyPI workflow. HACS users then see the update.
 
 ---
 

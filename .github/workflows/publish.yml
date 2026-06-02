@@ -1,8 +1,12 @@
 name: Publish to PyPI
 
+# PyPI publishing is decoupled from GitHub Releases so that GitHub Releases can
+# be used for the HACS *integration* version. The client library publishes only
+# on a dedicated tag (e.g. `client-v0.1.1`) or a manual run.
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+      - "client-v*"
   workflow_dispatch:  # Allow manual trigger
 
 jobs:
@@ -36,4 +40,4 @@ jobs:
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
-        run: twine upload dist/*
+        run: twine upload --skip-existing dist/*
