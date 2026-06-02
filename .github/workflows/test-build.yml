@@ -27,8 +27,8 @@ jobs:
       - name: Ruff
         run: ruff check esphome_mcp_client tests
 
-      - name: Pytest
-        run: pytest
+      - name: Pytest (unit; integration smoke tests run in smoke-test.yml)
+        run: pytest -m "not integration"
 
   build:
     name: Test package build

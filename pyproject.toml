@@ -75,6 +75,10 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
+markers = [
+    "integration: runs against a real esphome dashboard (auto-skips if esphome is absent)",
+    "compile: slow; compiles firmware and needs the platform toolchain",
+]
 
 [tool.mypy]
 python_version = "3.11"

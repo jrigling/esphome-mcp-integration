@@ -1,0 +1,64 @@
+name: ESPHome smoke test
+
+# Detects drift in the ESPHome dashboard / Device Builder API by running our
+# client against a real `esphome dashboard` across release channels. Needs no
+# secrets. Runs on a weekly schedule and on demand.
+on:
+  schedule:
+    - cron: "17 6 * * 1"  # Mondays 06:17 UTC (offset minute avoids cron congestion)
+  workflow_dispatch:
+    inputs:
+      run_compile:
+        description: "Also run the slow compile test (downloads a toolchain)"
+        type: boolean
+        default: false
+
+jobs:
+  smoke:
+    name: smoke (${{ matrix.channel }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - channel: stable
+            install: esphome
+            experimental: false
+          - channel: beta
+            install: --pre esphome
+            experimental: false
+          - channel: dev
+            install: git+https://github.com/esphome/esphome@dev
+            experimental: true
+    # dev breaks often for unrelated reasons: surface it, but don't fail the run.
+    continue-on-error: ${{ matrix.experimental }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install client + esphome (${{ matrix.channel }})
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          pip install ${{ matrix.install }}
+      - name: Print esphome version
+        run: esphome version
+      - name: Smoke test (REST + WebSocket spawn protocol)
+        run: pytest tests/integration -m "integration and not compile" -v
+
+  compile:
+    name: compile (stable)
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_compile }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install client + esphome
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]" esphome
+      - name: Compile test (slow)
+        run: pytest tests/integration -m "integration and compile" -v
