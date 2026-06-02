@@ -33,6 +33,9 @@ ENV/
 # macOS
 .DS_Store
 
+# Windows / WSL download metadata
+*:Zone.Identifier
+
 # Home Assistant specific
 *.log
 .HA_VERSION
