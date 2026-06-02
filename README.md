@@ -83,8 +83,9 @@ from the Supervisor, so it adapts automatically rather than hard-coding a URL.
    confirm-only setup.
 
    [![Open your Home Assistant instance and start setting up a new integration.](https://my.home-assistant.io/badges/config_flow_start.svg)](https://my.home-assistant.io/redirect/config_flow_start/?domain=esphome_mcp_bridge)
-4. The `ESPHome Builder` API now appears in the LLM/Assist API selector and to
-   MCP clients.
+4. The `ESPHome Builder` LLM API is now registered. To actually expose it to an
+   AI agent, point Home Assistant's MCP Server at it — see
+   [Connecting an AI agent](#connecting-an-ai-agent-mcp) below.
 
 ### Manual
 
@@ -94,6 +95,32 @@ Services → Add Integration** as above.
 
 > Home Assistant installs the `esphome-mcp-client` PyPI dependency
 > automatically (declared in the integration manifest).
+
+## Connecting an AI agent (MCP)
+
+Installing this integration only **registers** the *ESPHome Builder* LLM API —
+it does not expose it to your agent by itself. Home Assistant's separate
+**Model Context Protocol Server** integration is what serves an API's tools to
+MCP clients (Claude Desktop, Claude Code, …).
+
+1. Install and add **ESPHome MCP Bridge** (above) so the *ESPHome Builder* API
+   is registered.
+2. Add the **Model Context Protocol Server** integration: **Settings → Devices &
+   Services → Add Integration → Model Context Protocol Server**.
+3. In its dialog, under **Control Home Assistant**, tick **ESPHome Builder**
+   (you can leave **Assist** ticked too — it's multi-select), then **Submit**.
+4. Point your MCP client at Home Assistant's MCP server endpoint (the MCP Server
+   integration's docs give the SSE URL + token), then refresh its tool list. The
+   ESPHome tools (`esphome_list_devices`, `esphome_write_yaml`,
+   `esphome_compile`, …) will appear.
+
+> **Already had the MCP Server set up before installing this?** The API list is
+> read when that integration is configured, so **ESPHome Builder won't be
+> listed**. Delete the Model Context Protocol Server integration and re-add it
+> so the checkbox appears.
+
+If **ESPHome Builder** is missing from the checkbox list in step 3, the
+integration isn't loaded — check the logs and confirm it's on the latest version.
 
 ## Security
 
