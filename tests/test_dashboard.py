@@ -52,6 +52,31 @@ async def test_inventory_tolerates_missing_ping_endpoint(session):
     assert inv[0]["online"] is None
 
 
+async def test_inventory_warns_on_unexpected_shape(session, caplog):
+    # Protocol drift: /devices no longer returns a 'configured' key.
+    with aioresponses() as m:
+        m.get(f"{BASE}/devices", payload={"items": []})
+        m.get(f"{BASE}/ping", payload={})
+        client = DashboardClient(session, BASE)
+        inv = await client.inventory()
+    assert inv == []
+    assert "may have changed" in caplog.text
+
+
+async def test_version_returns_value(session):
+    with aioresponses() as m:
+        m.get(f"{BASE}/version", payload={"version": "2026.4.0"})
+        client = DashboardClient(session, BASE)
+        assert await client.version() == "2026.4.0"
+
+
+async def test_version_tolerates_missing_endpoint(session):
+    with aioresponses() as m:
+        m.get(f"{BASE}/version", status=404)
+        client = DashboardClient(session, BASE)
+        assert await client.version() is None
+
+
 async def test_get_config_returns_text(session):
     with aioresponses() as m:
         m.get(

@@ -87,6 +87,18 @@ class DashboardClient:
         """Raw ``GET /devices`` payload: ``{configured: [...], importable: [...]}``."""
         return await self._get_json("/devices")
 
+    async def version(self) -> str | None:
+        """Return the dashboard's reported ESPHome version, or None.
+
+        Useful for triaging API-drift reports: log which version a failing
+        operation was talking to. Tolerates the endpoint being absent.
+        """
+        try:
+            data = await self._get_json("/version")
+        except DashboardError:
+            return None
+        return data.get("version")
+
     async def ping(self) -> dict[str, bool]:
         """``GET /ping`` -> mapping of configuration filename to online status."""
         try:
@@ -103,6 +115,15 @@ class DashboardClient:
         ``address``, ``web_port``, ``online``.
         """
         devices = await self.list_devices()
+        if "configured" not in devices:
+            # A missing 'configured' key means the /devices response shape has
+            # drifted from the protocol we target - surface it loudly rather
+            # than silently returning an empty inventory.
+            _LOGGER.warning(
+                "ESPHome /devices response missing 'configured' key (keys: %s); "
+                "the dashboard API may have changed",
+                sorted(devices),
+            )
         online = await self.ping()
         result: list[dict] = []
         for dev in devices.get("configured", []):
