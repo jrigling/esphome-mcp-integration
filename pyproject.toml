@@ -39,7 +39,6 @@ dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.21.0",
     "pytest-cov>=4.0",
-    "aioresponses>=0.7.6",
     "black>=23.0",
     "ruff>=0.1.0",
     "mypy>=1.0",
@@ -72,6 +71,8 @@ ignore = ["E501"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# Skip the slow toolchain compile by default; CI jobs override -m explicitly.
+addopts = "-m 'not compile'"
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]

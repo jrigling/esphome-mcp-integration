@@ -1,12 +1,11 @@
 """Tests for the dashboard client REST surface and result model."""
 import aiohttp
 import pytest
-from aioresponses import aioresponses
 
 from esphome_mcp_client import DashboardClient
 from esphome_mcp_client.dashboard import CommandResult
 
-BASE = "http://5c53de3b-esphome:6052"
+from .conftest import json_route, make_app, status_route, text_route
 
 
 @pytest.fixture
@@ -15,7 +14,7 @@ async def session():
         yield s
 
 
-async def test_inventory_merges_ping_online_status(session):
+async def test_inventory_merges_ping_online_status(serve, session):
     devices = {
         "configured": [
             {
@@ -30,11 +29,16 @@ async def test_inventory_merges_ping_online_status(session):
         "importable": [],
     }
     ping = {"kitchen.yaml": True, "garage.yaml": False}
-    with aioresponses() as m:
-        m.get(f"{BASE}/devices", payload=devices)
-        m.get(f"{BASE}/ping", payload=ping)
-        client = DashboardClient(session, BASE)
-        inv = await client.inventory()
+    base = await serve(
+        make_app(
+            [
+                ("GET", "/devices", json_route(devices)),
+                ("GET", "/ping", json_route(ping)),
+            ]
+        )
+    )
+    client = DashboardClient(session, base)
+    inv = await client.inventory()
 
     by_name = {d["name"]: d for d in inv}
     assert by_name["kitchen"]["online"] is True
@@ -42,49 +46,57 @@ async def test_inventory_merges_ping_online_status(session):
     assert by_name["garage"]["online"] is False
 
 
-async def test_inventory_tolerates_missing_ping_endpoint(session):
+async def test_inventory_tolerates_missing_ping_endpoint(serve, session):
     devices = {"configured": [{"name": "kitchen", "configuration": "kitchen.yaml"}]}
-    with aioresponses() as m:
-        m.get(f"{BASE}/devices", payload=devices)
-        m.get(f"{BASE}/ping", status=404)
-        client = DashboardClient(session, BASE)
-        inv = await client.inventory()
+    base = await serve(
+        make_app(
+            [
+                ("GET", "/devices", json_route(devices)),
+                ("GET", "/ping", status_route(404)),
+            ]
+        )
+    )
+    client = DashboardClient(session, base)
+    inv = await client.inventory()
     assert inv[0]["online"] is None
 
 
-async def test_inventory_warns_on_unexpected_shape(session, caplog):
+async def test_inventory_warns_on_unexpected_shape(serve, session, caplog):
     # Protocol drift: /devices no longer returns a 'configured' key.
-    with aioresponses() as m:
-        m.get(f"{BASE}/devices", payload={"items": []})
-        m.get(f"{BASE}/ping", payload={})
-        client = DashboardClient(session, BASE)
-        inv = await client.inventory()
+    base = await serve(
+        make_app(
+            [
+                ("GET", "/devices", json_route({"items": []})),
+                ("GET", "/ping", json_route({})),
+            ]
+        )
+    )
+    client = DashboardClient(session, base)
+    inv = await client.inventory()
     assert inv == []
     assert "may have changed" in caplog.text
 
 
-async def test_version_returns_value(session):
-    with aioresponses() as m:
-        m.get(f"{BASE}/version", payload={"version": "2026.4.0"})
-        client = DashboardClient(session, BASE)
-        assert await client.version() == "2026.4.0"
+async def test_version_returns_value(serve, session):
+    base = await serve(
+        make_app([("GET", "/version", json_route({"version": "2026.4.0"}))])
+    )
+    client = DashboardClient(session, base)
+    assert await client.version() == "2026.4.0"
 
 
-async def test_version_tolerates_missing_endpoint(session):
-    with aioresponses() as m:
-        m.get(f"{BASE}/version", status=404)
-        client = DashboardClient(session, BASE)
-        assert await client.version() is None
+async def test_version_tolerates_missing_endpoint(serve, session):
+    base = await serve(make_app([("GET", "/version", status_route(404))]))
+    client = DashboardClient(session, base)
+    assert await client.version() is None
 
 
-async def test_get_config_returns_text(session):
-    with aioresponses() as m:
-        m.get(
-            f"{BASE}/edit?configuration=kitchen.yaml",
-            body="esphome:\n  name: kitchen\n",
-        )
-        client = DashboardClient(session, BASE)
-        text = await client.get_config("kitchen.yaml")
+async def test_get_config_returns_text(serve, session):
+    base = await serve(
+        make_app([("GET", "/edit", text_route("esphome:\n  name: kitchen\n"))])
+    )
+    client = DashboardClient(session, base)
+    text = await client.get_config("kitchen.yaml")
     assert "name: kitchen" in text
 
 
@@ -98,6 +110,6 @@ def test_command_result_success_and_output():
     assert failed.truncated is True
 
 
-def test_ws_base_derived_from_http_base(session):
-    client = DashboardClient(session, "http://host:6052")
+def test_ws_base_derived_from_http_base():
+    client = DashboardClient(None, "http://host:6052")
     assert client._ws_base == "ws://host:6052"

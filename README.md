@@ -118,8 +118,43 @@ Services → Add Integration** as above.
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 ruff check esphome_mcp_client tests
-pytest
+pytest                                   # unit tests (fast)
+pip install esphome                      # only needed for the lines below
+pytest tests/integration -m integration  # smoke tests vs a real dashboard
 ```
+
+## Testing approach
+
+Two layers, both deliberately avoiding fakes of the things most likely to drift:
+
+**Unit tests run against a real in-process `aiohttp` server, not a mocking
+library.** We originally used [`aioresponses`](https://github.com/pnuckowski/aioresponses),
+but `aiohttp` 3.12 added a required `stream_writer` argument to `ClientResponse`
+that aioresponses doesn't pass — and there is no fixed release. Worse, it passed
+locally (our dev venv happened to pin an older `aiohttp` transitively) and only
+failed in CI on the latest `aiohttp`. A mock that reimplements `aiohttp`'s
+internals can silently fall out of sync with `aiohttp`; a tiny real server
+(`tests/conftest.py`) cannot. So we serve canned responses from an actual
+`aiohttp.web` app on a loopback port and exercise the real client against it.
+
+**Integration smoke tests run against a real `esphome dashboard`**
+(`tests/integration/`), launched on a temp config dir, exercising the REST
+endpoints and the WebSocket spawn protocol end to end. They auto-skip when
+ESPHome isn't installed, so the unit run is unaffected.
+
+### Detecting upstream API drift
+
+The dashboard protocol is an external contract ESPHome controls, so we watch it
+actively rather than waiting for user reports:
+
+- **Scheduled smoke workflow** ([`smoke-test.yml`](.github/workflows/smoke-test.yml))
+  runs the integration tests weekly across the **stable / beta / dev** ESPHome
+  channels. If ESPHome changes the API, a build goes red before users hit it.
+  (The `dev` channel is allowed-failure; `compile` is gated behind a manual
+  dispatch as it downloads a full toolchain.)
+- **Defensive client logging** — `DashboardClient.inventory()` logs a warning if
+  the `/devices` response loses its expected shape, and `version()` surfaces the
+  dashboard's ESPHome version, so drift becomes a visible log line for triage.
 
 ## License
 
