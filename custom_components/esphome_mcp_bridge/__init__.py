@@ -9,7 +9,11 @@ import logging
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers import llm
+
+# Import the function directly. A bare `from homeassistant.helpers import llm`
+# would be shadowed: importing the local `.llm` submodule below rebinds the
+# name `llm` in this package namespace to our own module.
+from homeassistant.helpers.llm import async_register_api
 
 from .const import API_ID, DOMAIN
 from .llm import ESPHomeBuilderAPI
@@ -23,7 +27,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # async_register_api returns an unregister callback; tying it to the entry
     # means the LLM API is cleanly removed if the integration is unloaded.
-    unregister = llm.async_register_api(hass, ESPHomeBuilderAPI(hass))
+    unregister = async_register_api(hass, ESPHomeBuilderAPI(hass))
     entry.async_on_unload(unregister)
 
     _LOGGER.info("ESPHome MCP Bridge: registered LLM API '%s'", API_ID)
