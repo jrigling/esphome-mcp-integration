@@ -1,8 +1,9 @@
 """Tests for the dashboard client REST surface and result model."""
 import aiohttp
 import pytest
+from aiohttp import web
 
-from esphome_mcp_client import DashboardClient
+from esphome_mcp_client import DashboardClient, DashboardError
 from esphome_mcp_client.dashboard import CommandResult
 
 from .conftest import json_route, make_app, status_route, text_route
@@ -98,6 +99,22 @@ async def test_get_config_returns_text(serve, session):
     client = DashboardClient(session, base)
     text = await client.get_config("kitchen.yaml")
     assert "name: kitchen" in text
+
+
+async def test_ws_non_upgrade_gives_actionable_error(serve, session):
+    """Device Builder serves the SPA (HTTP 200) for /validate instead of a WS
+    upgrade. The client should explain that, not surface a raw aiohttp error."""
+
+    async def spa_fallback(_request):
+        return web.Response(text="<html>device builder</html>")
+
+    base = await serve(make_app([("GET", "/validate", spa_fallback)]))
+    client = DashboardClient(session, base)
+    with pytest.raises(DashboardError) as exc:
+        await client.validate("kitchen.yaml", max_seconds=5)
+    msg = str(exc.value)
+    assert "Device Builder" in msg
+    assert "compile" in msg
 
 
 def test_command_result_success_and_output():

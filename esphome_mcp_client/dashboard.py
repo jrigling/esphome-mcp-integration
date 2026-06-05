@@ -57,6 +57,31 @@ class CommandResult:
         return self.exit_code == 0
 
 
+# Endpoints the new ESPHome Device Builder does NOT expose over its legacy API
+# (only /compile and /upload remain). Requesting these returns the SPA index
+# (HTTP 200) instead of a WebSocket upgrade.
+_DEVICE_BUILDER_MISSING = {"/validate", "/logs", "/clean", "/run"}
+
+
+def _handshake_error(path: str, err: aiohttp.WSServerHandshakeError) -> str:
+    """Turn a non-upgrade WebSocket handshake into an actionable message."""
+    endpoint = path.lstrip("/")
+    if err.status == 200 and path in _DEVICE_BUILDER_MISSING:
+        return (
+            f"The '{endpoint}' endpoint did not upgrade to a WebSocket (HTTP 200). "
+            "This ESPHome add-on is running the new ESPHome Device Builder, whose "
+            f"API does not expose '{endpoint}' (only compile and upload remain on "
+            "the legacy interface). Workarounds: run a compile to surface "
+            "configuration errors, and use the ESPHome dashboard UI for live logs."
+        )
+    if err.status == 200:
+        return (
+            f"The '{endpoint}' endpoint returned HTTP 200 without a WebSocket "
+            "upgrade; this ESPHome backend may not support it."
+        )
+    return f"WS {path} handshake failed: {err.status} {err.message}"
+
+
 class DashboardClient:
     """Async client bound to one ESPHome dashboard base URL.
 
@@ -229,6 +254,8 @@ class DashboardClient:
                     elif event == "exit":
                         result.exit_code = data.get("code")
                         break
+        except aiohttp.WSServerHandshakeError as err:
+            raise DashboardError(_handshake_error(path, err)) from err
         except aiohttp.ClientError as err:
             raise DashboardError(f"WS {path} failed: {err}") from err
         return result

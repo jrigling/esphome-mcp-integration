@@ -315,7 +315,10 @@ class ValidateTool(_BuildTool):
     name = "esphome_validate"
     description = (
         "Validate an ESPHome configuration file. Returns the validator output "
-        "and exit code (0 = valid). Run this after editing, before compiling."
+        "and exit code (0 = valid). Run this after editing, before compiling. "
+        "Note: the newer ESPHome Device Builder add-on does not expose standalone "
+        "validation; if this reports it's unavailable, run esphome_compile, which "
+        "also validates."
     )
     _method = "validate"
 
