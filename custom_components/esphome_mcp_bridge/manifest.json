@@ -8,6 +8,6 @@
   "integration_type": "service",
   "iot_class": "local_polling",
   "issue_tracker": "https://github.com/jrigling/esphome-mcp-integration/issues",
-  "requirements": ["esphome-mcp-client==0.1.1"],
-  "version": "0.3.4"
+  "requirements": ["esphome-mcp-client==0.1.2"],
+  "version": "0.3.5"
 }

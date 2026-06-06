@@ -15,3 +15,10 @@ BLOCKED_FILES = frozenset({"secrets.yaml", "secrets.yml"})
 
 # Allowed extensions for write/create.
 ALLOWED_EXTENSIONS = (".yaml", ".yml")
+
+# The ESPHome secrets file. The add-secret tool may insert keys here (only),
+# but secrets are never read back or exposed through any tool.
+SECRETS_FILE = "secrets.yaml"
+
+# Permitted shape of a secret key (ESPHome uses snake_case identifiers).
+SECRET_KEY_PATTERN = r"^[A-Za-z_][A-Za-z0-9_-]*$"

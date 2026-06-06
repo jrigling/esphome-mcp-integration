@@ -16,3 +16,7 @@ class AddonNotFoundError(SupervisorError):
 
 class DashboardError(ESPHomeMCPError):
     """Raised when an ESPHome dashboard request fails."""
+
+
+class DeviceLogError(ESPHomeMCPError):
+    """Raised when streaming logs directly from a device fails."""

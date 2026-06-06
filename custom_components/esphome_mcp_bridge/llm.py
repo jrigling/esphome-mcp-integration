@@ -12,19 +12,24 @@ add-on (stable, beta, or dev) via the ``esphome_mcp_client`` library.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
+import re
 from typing import Any
 
 import voluptuous as vol
+import yaml
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import llm
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from esphome_mcp_client import (
     DashboardClient,
+    DeviceLogError,
     ESPHomeMCPError,
     SupervisorClient,
+    async_stream_device_logs,
 )
 
 from .const import (
@@ -34,6 +39,8 @@ from .const import (
     BLOCKED_FILES,
     DOMAIN,
     ESPHOME_CONFIG_DIR,
+    SECRET_KEY_PATTERN,
+    SECRETS_FILE,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -77,6 +84,34 @@ def _write_file(path: str, content: str) -> None:
         fh.write(content)
 
 
+class _SecretKeyExists(Exception):
+    """Raised when an insert-only secret write hits an existing key."""
+
+
+def _insert_secret(path: str, key: str, value: str) -> None:
+    """Insert ``key: value`` into secrets.yaml. Never overwrites; never reads
+    values back out. Raises :class:`_SecretKeyExists` if the key is present."""
+    content = ""
+    existing: dict = {}
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as fh:
+            content = fh.read()
+        try:
+            parsed = yaml.safe_load(content)
+        except yaml.YAMLError as err:
+            raise ValueError(f"secrets.yaml could not be parsed: {err}") from err
+        if isinstance(parsed, dict):
+            existing = parsed
+        elif parsed is not None:
+            raise ValueError("secrets.yaml is not a mapping of key: value")
+    if key in existing:
+        raise _SecretKeyExists(key)
+    # json.dumps yields a YAML-safe double-quoted scalar (handles spaces/specials).
+    prefix = "" if content == "" or content.endswith("\n") else "\n"
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write(f"{prefix}{key}: {json.dumps(value)}\n")
+
+
 async def _async_dashboard(
     hass: HomeAssistant, slug: str | None
 ) -> tuple[DashboardClient, str]:
@@ -112,6 +147,44 @@ def _result_to_dict(slug: str, configuration: str, result: Any) -> dict[str, Any
         "truncated": result.truncated,
         "output": result.output,
     }
+
+
+def _esphome_credentials(hass: HomeAssistant) -> list[dict[str, Any]]:
+    """Connection params for devices adopted by HA's ESPHome integration.
+
+    Used to stream logs straight from the device's native API, which works
+    regardless of whether the add-on runs the classic dashboard or the Device
+    Builder. Encryption keys/passwords are used in-memory only and never
+    returned to the caller.
+    """
+    creds: list[dict[str, Any]] = []
+    for entry in hass.config_entries.async_entries("esphome"):
+        data = entry.data
+        creds.append(
+            {
+                "host": data.get("host"),
+                "port": data.get("port") or 6053,
+                "noise_psk": data.get("noise_psk"),
+                "password": data.get("password"),
+                "device_name": data.get("device_name"),
+            }
+        )
+    return creds
+
+
+def _match_device(
+    creds: list[dict[str, Any]], *, name: str | None, address: str | None
+) -> dict[str, Any] | None:
+    """Pick the adopted-device entry matching a host (preferred) or device name."""
+    if address:
+        for cred in creds:
+            if cred["host"] == address:
+                return cred
+    if name:
+        for cred in creds:
+            if cred["device_name"] == name:
+                return cred
+    return None
 
 
 # --------------------------------------------------------------------------- #
@@ -278,6 +351,54 @@ class WriteYamlTool(llm.Tool):
         return {"success": True, "filename": filename}
 
 
+class AddSecretTool(llm.Tool):
+    """Insert a key into secrets.yaml (insert-only, write-only)."""
+
+    name = "esphome_add_secret"
+    description = (
+        "Add a secret to /config/esphome/secrets.yaml so a configuration's "
+        "!secret references resolve. INSERT-ONLY and WRITE-ONLY: it never reads "
+        "or returns existing secret values, and it returns an error if the key "
+        "already exists rather than overwriting it. Use this when scaffolding a "
+        "new device configuration to ensure every referenced secret exists "
+        "(e.g. wifi_password, api_encryption_key, ota_password)."
+    )
+    parameters = vol.Schema(
+        {
+            vol.Required("key"): str,
+            vol.Required("value"): str,
+        }
+    )
+
+    async def async_call(
+        self, hass: HomeAssistant, tool_input: llm.ToolInput, llm_context: llm.LLMContext
+    ) -> dict[str, Any]:
+        key = tool_input.tool_args["key"]
+        value = tool_input.tool_args["value"]
+        if not re.match(SECRET_KEY_PATTERN, key):
+            return {
+                "error": (
+                    f"Invalid secret key {key!r}; use a snake_case identifier "
+                    "(letters, digits, underscore, hyphen)."
+                )
+            }
+        path = os.path.join(ESPHOME_CONFIG_DIR, SECRETS_FILE)
+        try:
+            await hass.async_add_executor_job(_insert_secret, path, key, value)
+        except _SecretKeyExists:
+            return {
+                "error": (
+                    f"Secret {key!r} already exists; refusing to overwrite "
+                    "(insert-only). Choose a different key or update it manually."
+                )
+            }
+        except (OSError, ValueError) as err:
+            return {"error": str(err)}
+        # Deliberately never echo the value back.
+        _LOGGER.info("esphome_add_secret: inserted secret key '%s'", key)
+        return {"success": True, "key": key, "created": True}
+
+
 # --------------------------------------------------------------------------- #
 # Build-cycle tools (dashboard WebSocket spawn protocol)
 # --------------------------------------------------------------------------- #
@@ -402,19 +523,27 @@ class RunTool(_FlashTool):
 
 
 class LogsTool(llm.Tool):
-    """Capture a bounded window of live device logs for debugging."""
+    """Capture a bounded window of live device logs for debugging.
+
+    Prefers streaming directly from the device's native API (works on both the
+    classic dashboard and the new Device Builder); falls back to the dashboard's
+    /logs endpoint (classic dashboard only).
+    """
 
     name = "esphome_logs"
     description = (
         "Stream live logs from a running ESPHome device for debugging, capturing "
-        "a bounded window (default ~30s or 500 lines). 'port' defaults to 'OTA'; "
-        "pass a device IP/hostname for a specific target. Returns captured log "
-        "lines; 'truncated' is true if the window limit was hit."
+        "a bounded window (default ~30s or 500 lines). If the device is adopted "
+        "in Home Assistant, logs are read directly from the device (works on both "
+        "the classic dashboard and the new Device Builder); otherwise it falls "
+        "back to the dashboard log endpoint. Optionally pass 'address' to target a "
+        "device IP/hostname. Returns captured log lines; 'truncated' is true if "
+        "the window limit was hit."
     )
     parameters = vol.Schema(
         {
             vol.Required("configuration"): str,
-            vol.Optional("port", default="OTA"): str,
+            vol.Optional("address"): str,
             vol.Optional("max_seconds", default=30): vol.All(
                 vol.Coerce(float), vol.Range(min=1, max=120)
             ),
@@ -430,15 +559,66 @@ class LogsTool(llm.Tool):
             configuration = _guard(args["configuration"], require_yaml=True)
         except ValueError as err:
             return {"error": str(err)}
-        port = args.get("port", "OTA")
         max_seconds = args.get("max_seconds", 30)
+        address = args.get("address")
+        addon_slug = args.get("addon_slug")
+
+        # Identify the device (name + address) from dashboard inventory.
+        name: str | None = None
+        dash_client: DashboardClient | None = None
+        slug: str | None = None
         try:
-            client, slug = await _async_dashboard(hass, args.get("addon_slug"))
-            result = await client.logs(configuration, port, max_seconds=max_seconds)
+            dash_client, slug = await _async_dashboard(hass, addon_slug)
+            for dev in await dash_client.inventory():
+                if dev.get("configuration") == configuration:
+                    name = dev.get("name")
+                    address = address or dev.get("address")
+                    break
+        except ESPHomeMCPError:
+            pass  # dashboard may be unreachable; device-direct can still work
+
+        # 1. Direct from the device (backend-independent) if it's adopted in HA.
+        device_error: str | None = None
+        creds = _match_device(_esphome_credentials(hass), name=name, address=address)
+        if creds:
+            host = address or creds["host"]
+            try:
+                result = await async_stream_device_logs(
+                    host,
+                    port=creds["port"],
+                    password=creds["password"],
+                    noise_psk=creds["noise_psk"],
+                    max_seconds=max_seconds,
+                )
+            except DeviceLogError as err:
+                device_error = str(err)
+            else:
+                response = _result_to_dict(slug or "", configuration, result)
+                response["mode"] = "device"
+                response["address"] = host
+                return response
+
+        # 2. Dashboard fallback (classic dashboard only).
+        if dash_client is None:
+            return {
+                "error": device_error
+                or "No reachable ESPHome dashboard, and the device is not adopted "
+                "in Home Assistant for direct log streaming."
+            }
+        try:
+            result = await dash_client.logs(configuration, "OTA", max_seconds=max_seconds)
         except ESPHomeMCPError as err:
-            return {"error": str(err)}
+            msg = str(err)
+            if device_error:
+                msg += f" | device-direct also failed: {device_error}"
+            elif not creds:
+                msg += (
+                    " | tip: adopt this device in Home Assistant's ESPHome "
+                    "integration to enable direct log streaming."
+                )
+            return {"error": msg}
         response = _result_to_dict(slug, configuration, result)
-        response["port"] = port
+        response["mode"] = "dashboard"
         return response
 
 
@@ -452,7 +632,9 @@ _API_PROMPT = (
     "/config/esphome, then validate, compile, upload (flash), run, and stream "
     "logs via the ESPHome dashboard. A typical flow is: list devices -> read or "
     "create a config -> write changes -> validate -> compile -> run (flash) -> "
-    "check logs. Never read, write, or build secrets.yaml. Compilation and "
+    "check logs. When scaffolding a new config, use esphome_add_secret to insert "
+    "any referenced secrets (it never overwrites existing ones). Never read, "
+    "write, or build secrets.yaml directly. Compilation and "
     "uploads run to completion before returning; log streaming returns a bounded "
     "window. Prefer validating before compiling, and report exit codes and "
     "relevant log lines back to the user."
@@ -474,6 +656,7 @@ class ESPHomeBuilderAPI(llm.API):
             ReadYamlTool(),
             CreateConfigTool(),
             WriteYamlTool(),
+            AddSecretTool(),
             ValidateTool(),
             CompileTool(),
             CleanTool(),

@@ -41,11 +41,12 @@ The `ESPHome Builder` LLM API exposes these tools:
 | `esphome_read_yaml` | Read a config from `/config/esphome` |
 | `esphome_create_config` | Create a **new** config (fails if it exists) |
 | `esphome_write_yaml` | Overwrite an existing config |
+| `esphome_add_secret` | Insert a key into `secrets.yaml` — **insert-only, write-only** (never reads/returns values; errors if the key exists) |
 | `esphome_validate` | Validate a config without building |
 | `esphome_compile` | Compile firmware (runs to completion, returns log + exit code) |
 | `esphome_upload` | Flash firmware to a device (`port` defaults to `OTA`) |
 | `esphome_run` | Compile **and** flash in one step (dashboard "Install") |
-| `esphome_logs` | Capture a bounded window of live device logs for debugging |
+| `esphome_logs` | Capture a bounded window of live device logs — streams **directly from the device** (works on classic dashboard *and* Device Builder) when it's adopted in HA, else falls back to the dashboard |
 | `esphome_clean` | Remove cached build artifacts |
 
 A typical agent flow: **list devices → read/create config → write → validate →

@@ -8,15 +8,17 @@ integration (or any async aiohttp app).
 from __future__ import annotations
 
 from .dashboard import CommandResult, DashboardClient
+from .device_logs import async_stream_device_logs
 from .exceptions import (
     AddonNotFoundError,
     DashboardError,
+    DeviceLogError,
     ESPHomeMCPError,
     SupervisorError,
 )
 from .supervisor import AddonInfo, SupervisorClient
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 
 __all__ = [
     "AddonInfo",
@@ -24,8 +26,10 @@ __all__ = [
     "CommandResult",
     "DashboardClient",
     "DashboardError",
+    "DeviceLogError",
     "ESPHomeMCPError",
     "SupervisorClient",
     "SupervisorError",
+    "async_stream_device_logs",
     "__version__",
 ]
