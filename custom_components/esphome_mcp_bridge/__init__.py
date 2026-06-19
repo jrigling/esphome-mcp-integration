@@ -15,15 +15,40 @@ from homeassistant.core import HomeAssistant
 # name `llm` in this package namespace to our own module.
 from homeassistant.helpers.llm import async_get_apis, async_register_api
 
-from .const import API_ID, DOMAIN
+from .const import (
+    API_ID,
+    CONF_ALLOW_EXTRA_FILES,
+    DEFAULT_ALLOW_EXTRA_FILES,
+    DOMAIN,
+)
 from .llm import ESPHomeBuilderAPI
 
 _LOGGER = logging.getLogger(__name__)
 
 
+def _store_options(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Cache the entry's effective options into hass.data for the file tools.
+
+    Options take precedence over the value captured at install time (data), so
+    changes made through the options flow apply without a restart.
+    """
+    allow_extra = entry.options.get(
+        CONF_ALLOW_EXTRA_FILES,
+        entry.data.get(CONF_ALLOW_EXTRA_FILES, DEFAULT_ALLOW_EXTRA_FILES),
+    )
+    hass.data.setdefault(DOMAIN, {})["allow_extra_files"] = bool(allow_extra)
+
+
+async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Apply option changes live (the file tools read this on each call)."""
+    _store_options(hass, entry)
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up ESPHome MCP Bridge from a config entry."""
     hass.data.setdefault(DOMAIN, {})
+    _store_options(hass, entry)
+    entry.async_on_unload(entry.add_update_listener(_async_options_updated))
 
     # Skip if already registered. On Home Assistant 2025.1 and earlier,
     # async_register_api returns None (no unregister), so the API persists

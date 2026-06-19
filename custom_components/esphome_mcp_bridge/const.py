@@ -7,6 +7,13 @@ DOMAIN = "esphome_mcp_bridge"
 API_ID = "esphome_builder"
 API_NAME = "ESPHome Builder"
 
+# Config/options key: when enabled, the read/create/write tools may operate on
+# files other than .yaml/.yml (e.g. C++ in a custom `components/` directory) and
+# may use relative subdirectory paths. secrets.yaml stays blocked regardless,
+# and paths can never escape ESPHOME_CONFIG_DIR. Default off (YAML-only).
+CONF_ALLOW_EXTRA_FILES = "allow_extra_files"
+DEFAULT_ALLOW_EXTRA_FILES = False
+
 # Filesystem root that file tools are confined to.
 ESPHOME_CONFIG_DIR = "/config/esphome"
 

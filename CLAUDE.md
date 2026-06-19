@@ -48,11 +48,35 @@ The integration's `llm.py` wraps the client in `llm.Tool` subclasses. `async_set
 
 ## Security invariants (do not weaken)
 
-In `llm.py`: `_sanitize_filename()` rejects `..`, `/`, `\`; `_guard()` blocks `secrets.yaml`/`secrets.yml` and (for writes/builds) enforces `.yaml`/`.yml`. File tools are always joined under `ESPHOME_CONFIG_DIR` (`/config/esphome`). Supervisor auth uses `os.environ["SUPERVISOR_TOKEN"]` read at call time — never stored.
+In `llm.py`: `_sanitize_filename()` rejects `..`, absolute paths, `\`, and empty/`.` path segments; `_guard()` blocks `secrets.yaml`/`secrets.yml` **by basename at any depth** and (for writes/builds) enforces `.yaml`/`.yml`. File tools are always joined under `ESPHOME_CONFIG_DIR` (`/config/esphome`). Supervisor auth uses `os.environ["SUPERVISOR_TOKEN"]` read at call time — never stored.
+
+**Extra file access option** (`CONF_ALLOW_EXTRA_FILES`, default off): a config/options-flow boolean for ESPHome configs that need local C++ in a `components/` directory. When enabled, the read/create/write tools pass `allow_extra=True` to `_guard()`, which (a) permits relative subdirectory paths and (b) lifts the `.yaml`/`.yml` requirement. It does **not** relax anything else: `..`/absolute/secrets are still blocked, and **build tools never pass it** — a configuration to validate/compile/flash is always a top-level YAML file. The effective value is cached in `hass.data[DOMAIN]["allow_extra_files"]` (options override install-time `data`), refreshed live by an `add_update_listener`, and read per-call by `_allow_extra_files()`; the API prompt gains `_EXTRA_FILES_PROMPT` when on. `_write_file()` `makedirs` parent dirs so writes into a new subdir succeed.
 
 ## Releasing
 
-See [PYPI_SETUP.md](PYPI_SETUP.md). Bump `pyproject.toml` `version` + `esphome_mcp_client/__init__.py` `__version__` together; if the integration needs the new client, bump the `manifest.json` requirement pin and integration `version` too. A GitHub Release triggers `publish.yml`.
+The two deliverables version and ship **independently**, each driven by its own git tag prefix. See [PYPI_SETUP.md](PYPI_SETUP.md) for PyPI specifics.
+
+### Tag scheme
+
+| Tag prefix | Example | Ships | Trigger |
+| --- | --- | --- | --- |
+| `client-v*` | `client-v0.1.2` | the PyPI client library `esphome-mcp-client` | push of the tag runs `publish.yml` (build → `twine check` → upload, `--skip-existing`) |
+| `v*` | `v0.3.5` | the HACS **integration** version | create a **GitHub Release** on the tag; HACS serves it to users |
+
+`client-v*` and `v*` advance on different cadences — a `v*` integration release that doesn't change the transport library needs **no** new `client-v*` tag (it just keeps its existing `manifest.json` pin).
+
+### Cutting a client (PyPI) release
+
+1. Bump `pyproject.toml` `version` **and** `esphome_mcp_client/__init__.py` `__version__` together (they must match — `twine check` and the egg metadata depend on it).
+2. Commit, then tag `client-vX.Y.Z` and push the tag. `publish.yml` publishes to PyPI. `--skip-existing` makes a re-run safe.
+
+### Cutting an integration (HACS) release
+
+1. If the integration needs the just-published client, bump the **exact `==` pin** in `custom_components/esphome_mcp_bridge/manifest.json` `requirements` to that client version.
+2. Bump the integration `version` in `manifest.json`.
+3. Commit, tag `vX.Y.Z`, push, and publish a **GitHub Release** on that tag.
+
+Order matters when both change: release the client (`client-v*`) **first** so the version the integration pins already exists on PyPI before users install the new integration.
 
 ## Networking caveat
 

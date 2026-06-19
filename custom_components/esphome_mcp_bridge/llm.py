@@ -37,6 +37,7 @@ from .const import (
     API_ID,
     API_NAME,
     BLOCKED_FILES,
+    DEFAULT_ALLOW_EXTRA_FILES,
     DOMAIN,
     ESPHOME_CONFIG_DIR,
     SECRET_KEY_PATTERN,
@@ -53,25 +54,53 @@ _ADDON_SLUG = vol.Optional("addon_slug")
 # --------------------------------------------------------------------------- #
 # Shared helpers
 # --------------------------------------------------------------------------- #
-def _sanitize_filename(filename: str) -> str:
-    """Reject path traversal and return the bare filename.
+def _sanitize_filename(filename: str, *, allow_subdirs: bool = False) -> str:
+    """Reject path traversal and return the safe relative path.
 
-    Any directory component or ``..`` sequence is treated as hostile rather
-    than silently stripped, so a caller can never escape ``/config/esphome``.
+    Any ``..`` sequence, absolute path, or backslash is treated as hostile
+    rather than silently stripped, so a caller can never escape
+    ``/config/esphome``. By default a directory separator is also rejected
+    (bare filename only); when ``allow_subdirs`` is set, relative subpaths such
+    as ``components/my_component/sensor.h`` are permitted but still cannot
+    traverse out of the config directory.
     """
-    if not filename or "/" in filename or "\\" in filename or ".." in filename:
+    if not filename or "\\" in filename or filename.startswith("/"):
         raise ValueError(f"Invalid filename: {filename!r}")
+    parts = filename.split("/")
+    if ".." in parts or "" in parts or "." in parts:
+        raise ValueError(f"Invalid filename: {filename!r}")
+    if not allow_subdirs and len(parts) > 1:
+        raise ValueError(
+            f"Invalid filename: {filename!r} (subdirectory paths require "
+            "enabling extra file access in the integration options)."
+        )
     return filename
 
 
-def _guard(filename: str, *, require_yaml: bool = False) -> str:
-    """Sanitize, then block secrets and (optionally) non-YAML files."""
-    safe = _sanitize_filename(filename)
-    if safe in BLOCKED_FILES:
-        raise ValueError(f"Access to '{safe}' is not permitted.")
-    if require_yaml and not safe.endswith(ALLOWED_EXTENSIONS):
+def _guard(
+    filename: str, *, require_yaml: bool = False, allow_extra: bool = False
+) -> str:
+    """Sanitize, then block secrets and (optionally) non-YAML files.
+
+    ``allow_extra`` (driven by the integration option) relaxes two
+    restrictions for the file tools: it permits relative subdirectory paths and
+    lifts the ``.yaml``/``.yml`` requirement. Build tools never pass it - a
+    configuration to validate/compile/flash is always a top-level YAML file.
+    secrets.yaml is blocked (by basename, at any depth) regardless.
+    """
+    safe = _sanitize_filename(filename, allow_subdirs=allow_extra)
+    if os.path.basename(safe) in BLOCKED_FILES:
+        raise ValueError(f"Access to '{os.path.basename(safe)}' is not permitted.")
+    if require_yaml and not allow_extra and not safe.endswith(ALLOWED_EXTENSIONS):
         raise ValueError("Only .yaml or .yml files are allowed.")
     return safe
+
+
+def _allow_extra_files(hass: HomeAssistant) -> bool:
+    """Read the current 'extra file access' option from integration state."""
+    return bool(
+        hass.data.get(DOMAIN, {}).get("allow_extra_files", DEFAULT_ALLOW_EXTRA_FILES)
+    )
 
 
 def _read_file(path: str) -> str:
@@ -80,6 +109,11 @@ def _read_file(path: str) -> str:
 
 
 def _write_file(path: str, content: str) -> None:
+    # Create parent directories so writes into a (new) subdirectory such as
+    # components/my_component/ succeed; the dir is already inside the config dir.
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(content)
 
@@ -262,8 +296,11 @@ class ReadYamlTool(llm.Tool):
 
     name = "esphome_read_yaml"
     description = (
-        "Read the contents of an ESPHome YAML configuration file from "
-        "/config/esphome. Use this to inspect an existing device configuration."
+        "Read the contents of a file from /config/esphome - typically an ESPHome "
+        "YAML configuration. Use this to inspect an existing device "
+        "configuration. If extra file access is enabled in the integration "
+        "options, you may also read non-YAML files and use relative subdirectory "
+        "paths (e.g. components/my_component/sensor.h)."
     )
     parameters = vol.Schema({vol.Required("filename"): str})
 
@@ -271,7 +308,10 @@ class ReadYamlTool(llm.Tool):
         self, hass: HomeAssistant, tool_input: llm.ToolInput, llm_context: llm.LLMContext
     ) -> dict[str, Any]:
         try:
-            filename = _guard(tool_input.tool_args["filename"])
+            filename = _guard(
+                tool_input.tool_args["filename"],
+                allow_extra=_allow_extra_files(hass),
+            )
         except ValueError as err:
             return {"error": str(err)}
         path = os.path.join(ESPHOME_CONFIG_DIR, filename)
@@ -291,7 +331,11 @@ class CreateConfigTool(llm.Tool):
     description = (
         "Create a new ESPHome YAML configuration file in /config/esphome. Fails "
         "if a file with that name already exists - use esphome_write_yaml to "
-        "modify an existing configuration."
+        "modify an existing configuration. If extra file access is enabled in the "
+        "integration options, you may also create non-YAML files (e.g. C++ for a "
+        "custom component) and use relative subdirectory paths such as "
+        "components/my_component/sensor.h; any missing parent directories are "
+        "created."
     )
     parameters = vol.Schema(
         {
@@ -304,7 +348,11 @@ class CreateConfigTool(llm.Tool):
         self, hass: HomeAssistant, tool_input: llm.ToolInput, llm_context: llm.LLMContext
     ) -> dict[str, Any]:
         try:
-            filename = _guard(tool_input.tool_args["filename"], require_yaml=True)
+            filename = _guard(
+                tool_input.tool_args["filename"],
+                require_yaml=True,
+                allow_extra=_allow_extra_files(hass),
+            )
         except ValueError as err:
             return {"error": str(err)}
         path = os.path.join(ESPHOME_CONFIG_DIR, filename)
@@ -325,7 +373,11 @@ class WriteYamlTool(llm.Tool):
     name = "esphome_write_yaml"
     description = (
         "Write or overwrite an ESPHome YAML configuration file in "
-        "/config/esphome. Validate or compile afterward to confirm the change."
+        "/config/esphome. Validate or compile afterward to confirm the change. "
+        "If extra file access is enabled in the integration options, you may also "
+        "write non-YAML files (e.g. C++ for a custom component) and use relative "
+        "subdirectory paths such as components/my_component/sensor.h; any missing "
+        "parent directories are created."
     )
     parameters = vol.Schema(
         {
@@ -338,7 +390,11 @@ class WriteYamlTool(llm.Tool):
         self, hass: HomeAssistant, tool_input: llm.ToolInput, llm_context: llm.LLMContext
     ) -> dict[str, Any]:
         try:
-            filename = _guard(tool_input.tool_args["filename"], require_yaml=True)
+            filename = _guard(
+                tool_input.tool_args["filename"],
+                require_yaml=True,
+                allow_extra=_allow_extra_files(hass),
+            )
         except ValueError as err:
             return {"error": str(err)}
         path = os.path.join(ESPHOME_CONFIG_DIR, filename)
@@ -640,6 +696,14 @@ _API_PROMPT = (
     "relevant log lines back to the user."
 )
 
+# Appended to the prompt only when the 'extra file access' option is enabled.
+_EXTRA_FILES_PROMPT = (
+    " Extra file access is enabled: the read/create/write tools may also operate "
+    "on non-YAML files (e.g. C++ in a custom components/ directory) and accept "
+    "relative subdirectory paths such as components/my_component/sensor.h. "
+    "secrets.yaml remains off-limits, and paths can never escape /config/esphome."
+)
+
 
 class ESPHomeBuilderAPI(llm.API):
     """LLM API exposing the ESPHome development cycle."""
@@ -664,9 +728,12 @@ class ESPHomeBuilderAPI(llm.API):
             RunTool(),
             LogsTool(),
         ]
+        api_prompt = _API_PROMPT
+        if _allow_extra_files(self.hass):
+            api_prompt += _EXTRA_FILES_PROMPT
         return llm.APIInstance(
             api=self,
-            api_prompt=_API_PROMPT,
+            api_prompt=api_prompt,
             llm_context=llm_context,
             tools=tools,
         )

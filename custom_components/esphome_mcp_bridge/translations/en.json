@@ -3,11 +3,30 @@
     "step": {
       "user": {
         "title": "Set up ESPHome MCP Bridge",
-        "description": "This exposes the **ESPHome Builder** LLM API to AI agents through Home Assistant's MCP server, covering the full ESPHome development cycle (inventory, read/write YAML, validate, compile, upload, run, logs).\n\nAn ESPHome dashboard add-on (stable, beta, or dev) must be installed. There is nothing to configure - select **Submit** to enable it."
+        "description": "This exposes the **ESPHome Builder** LLM API to AI agents through Home Assistant's MCP server, covering the full ESPHome development cycle (inventory, read/write YAML, validate, compile, upload, run, logs).\n\nAn ESPHome dashboard add-on (stable, beta, or dev) must be installed. Select **Submit** to enable it.",
+        "data": {
+          "allow_extra_files": "Allow editing non-YAML files"
+        },
+        "data_description": {
+          "allow_extra_files": "Let agents read, create, and write files other than .yaml/.yml and use subdirectory paths (e.g. C++ in a custom components/ directory). secrets.yaml stays protected and files can never leave /config/esphome. Leave off if you only edit device YAML. You can change this later in the integration options."
+        }
       }
     },
     "abort": {
       "single_instance_allowed": "ESPHome MCP Bridge is already configured. Only one instance is needed."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "ESPHome MCP Bridge options",
+        "data": {
+          "allow_extra_files": "Allow editing non-YAML files"
+        },
+        "data_description": {
+          "allow_extra_files": "Let agents read, create, and write files other than .yaml/.yml and use subdirectory paths (e.g. C++ in a custom components/ directory). secrets.yaml stays protected and files can never leave /config/esphome."
+        }
+      }
     }
   }
 }
