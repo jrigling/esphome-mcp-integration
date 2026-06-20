@@ -19,7 +19,11 @@ import custom_components.esphome_mcp_bridge as integration  # noqa: E402
 from custom_components.esphome_mcp_bridge.config_flow import (  # noqa: E402
     ESPHomeMCPBridgeConfigFlow,
 )
-from custom_components.esphome_mcp_bridge.const import API_ID  # noqa: E402
+from custom_components.esphome_mcp_bridge.const import (  # noqa: E402
+    API_ID,
+    CONF_ALLOW_EXTRA_FILES,
+    DOMAIN,
+)
 from custom_components.esphome_mcp_bridge.llm import ESPHomeBuilderAPI  # noqa: E402
 
 
@@ -32,11 +36,26 @@ class FakeHass:
 
 
 class FakeEntry:
-    def __init__(self) -> None:
+    """Minimal ConfigEntry stand-in modelling the surface async_setup_entry
+    touches: data/options dicts, on-unload registration, and update-listener
+    registration (which on a real entry returns an unsubscribe callable)."""
+
+    def __init__(self, data: dict | None = None, options: dict | None = None) -> None:
+        self.data: dict = data or {}
+        self.options: dict = options or {}
         self.on_unload: list = []
+        self.update_listeners: list = []
 
     def async_on_unload(self, func) -> None:
         self.on_unload.append(func)
+
+    def add_update_listener(self, listener):
+        self.update_listeners.append(listener)
+
+        def _remove() -> None:
+            self.update_listeners.remove(listener)
+
+        return _remove
 
 
 def test_api_is_ha_llm_api_subclass() -> None:
@@ -65,3 +84,17 @@ async def test_setup_entry_registers_llm_api() -> None:
     assert API_ID in registered_ids
 
     assert await integration.async_unload_entry(hass, entry) is True
+
+
+async def test_setup_caches_extra_files_option() -> None:
+    """The extra-file-access option is cached into hass.data for the file tools,
+    defaulting off and overridable via options."""
+    hass = FakeHass()
+    await integration.async_setup_entry(hass, FakeEntry())
+    assert hass.data[DOMAIN]["allow_extra_files"] is False
+
+    hass_on = FakeHass()
+    await integration.async_setup_entry(
+        hass_on, FakeEntry(options={CONF_ALLOW_EXTRA_FILES: True})
+    )
+    assert hass_on.data[DOMAIN]["allow_extra_files"] is True
