@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import aiohttp
@@ -211,6 +212,7 @@ class DashboardClient:
         *,
         max_seconds: float,
         max_lines: int,
+        on_line: Callable[[str], None] | None = None,
     ) -> CommandResult:
         url = f"{self._ws_base}{path}"
         result = CommandResult()
@@ -247,7 +249,10 @@ class DashboardClient:
                         continue
                     event = data.get("event")
                     if event == "line":
-                        result.lines.append(data.get("data", ""))
+                        line = data.get("data", "")
+                        result.lines.append(line)
+                        if on_line is not None:
+                            on_line(line)
                         if len(result.lines) >= max_lines:
                             result.truncated = True
                             break
@@ -266,12 +271,14 @@ class DashboardClient:
         *,
         max_seconds: float = DEFAULT_BUILD_TIMEOUT,
         max_lines: int = DEFAULT_MAX_LINES,
+        on_line: Callable[[str], None] | None = None,
     ) -> CommandResult:
         return await self._run_command(
             "/compile",
             {"type": "spawn", "configuration": configuration},
             max_seconds=max_seconds,
             max_lines=max_lines,
+            on_line=on_line,
         )
 
     async def validate(
@@ -280,12 +287,14 @@ class DashboardClient:
         *,
         max_seconds: float = 120,
         max_lines: int = DEFAULT_MAX_LINES,
+        on_line: Callable[[str], None] | None = None,
     ) -> CommandResult:
         return await self._run_command(
             "/validate",
             {"type": "spawn", "configuration": configuration},
             max_seconds=max_seconds,
             max_lines=max_lines,
+            on_line=on_line,
         )
 
     async def clean(
@@ -294,12 +303,14 @@ class DashboardClient:
         *,
         max_seconds: float = 120,
         max_lines: int = DEFAULT_MAX_LINES,
+        on_line: Callable[[str], None] | None = None,
     ) -> CommandResult:
         return await self._run_command(
             "/clean",
             {"type": "spawn", "configuration": configuration},
             max_seconds=max_seconds,
             max_lines=max_lines,
+            on_line=on_line,
         )
 
     async def upload(
@@ -309,12 +320,14 @@ class DashboardClient:
         *,
         max_seconds: float = DEFAULT_BUILD_TIMEOUT,
         max_lines: int = DEFAULT_MAX_LINES,
+        on_line: Callable[[str], None] | None = None,
     ) -> CommandResult:
         return await self._run_command(
             "/upload",
             {"type": "spawn", "configuration": configuration, "port": port},
             max_seconds=max_seconds,
             max_lines=max_lines,
+            on_line=on_line,
         )
 
     async def run(
@@ -324,6 +337,7 @@ class DashboardClient:
         *,
         max_seconds: float = DEFAULT_BUILD_TIMEOUT,
         max_lines: int = DEFAULT_MAX_LINES,
+        on_line: Callable[[str], None] | None = None,
     ) -> CommandResult:
         """Compile and upload in one step (``/run``)."""
         return await self._run_command(
@@ -331,6 +345,7 @@ class DashboardClient:
             {"type": "spawn", "configuration": configuration, "port": port},
             max_seconds=max_seconds,
             max_lines=max_lines,
+            on_line=on_line,
         )
 
     async def logs(
@@ -340,6 +355,7 @@ class DashboardClient:
         *,
         max_seconds: float = DEFAULT_LOG_SECONDS,
         max_lines: int = DEFAULT_LOG_LINES,
+        on_line: Callable[[str], None] | None = None,
     ) -> CommandResult:
         """Capture a bounded window of live device logs for debugging.
 
@@ -352,4 +368,5 @@ class DashboardClient:
             {"type": "spawn", "configuration": configuration, "port": port},
             max_seconds=max_seconds,
             max_lines=max_lines,
+            on_line=on_line,
         )
