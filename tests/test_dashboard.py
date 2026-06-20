@@ -117,6 +117,30 @@ async def test_ws_non_upgrade_gives_actionable_error(serve, session):
     assert "compile" in msg
 
 
+async def test_compile_streams_lines_via_on_line(serve, session):
+    """Build commands forward each output line to the on_line callback as it
+    arrives (used to feed a background job live), and still collect them."""
+
+    async def ws_spawn(request):
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+        await ws.receive()  # the client's spawn frame
+        for line in ("Compiling...", "Linking...", "Done"):
+            await ws.send_json({"event": "line", "data": line})
+        await ws.send_json({"event": "exit", "code": 0})
+        await ws.close()
+        return ws
+
+    base = await serve(make_app([("GET", "/compile", ws_spawn)]))
+    client = DashboardClient(session, base)
+    seen: list[str] = []
+    result = await client.compile("kitchen.yaml", max_seconds=5, on_line=seen.append)
+
+    assert result.exit_code == 0
+    assert result.lines == ["Compiling...", "Linking...", "Done"]
+    assert seen == ["Compiling...", "Linking...", "Done"]
+
+
 def test_command_result_success_and_output():
     ok = CommandResult(lines=["compiling", "done"], exit_code=0)
     assert ok.success is True

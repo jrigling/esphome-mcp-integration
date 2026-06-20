@@ -12,10 +12,12 @@ add-on (stable, beta, or dev) via the ``esphome_mcp_client`` library.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 import re
+import time
 from typing import Any
 
 import voluptuous as vol
@@ -43,6 +45,7 @@ from .const import (
     SECRET_KEY_PATTERN,
     SECRETS_FILE,
 )
+from .jobs import Job, JobRegistry
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -221,6 +224,56 @@ def _match_device(
     return None
 
 
+def _job_registry(hass: HomeAssistant) -> JobRegistry:
+    return hass.data.setdefault(DOMAIN, {}).setdefault("jobs", JobRegistry())
+
+
+async def _run_job(
+    hass: HomeAssistant,
+    job: Job,
+    method: str,
+    configuration: str,
+    addon_slug: str | None,
+    extra: dict[str, Any],
+) -> None:
+    """Background driver: run a build command, streaming lines into the job."""
+    try:
+        client, _ = await _async_dashboard(hass, addon_slug)
+        result = await getattr(client, method)(
+            configuration, on_line=job.lines.append, **extra
+        )
+        job.exit_code = result.exit_code
+        job.truncated = result.truncated
+        job.status = "done"
+    except ESPHomeMCPError as err:
+        job.status = "error"
+        job.error = str(err)
+    finally:
+        job.finished_at = time.time()
+
+
+def _start_background_job(
+    hass: HomeAssistant,
+    kind: str,
+    method: str,
+    configuration: str,
+    addon_slug: str | None,
+    extra: dict[str, Any],
+) -> dict[str, Any]:
+    """Create a job, launch it as an HA background task, return its initial state."""
+    job = _job_registry(hass).create(kind, configuration, addon_slug)
+    hass.async_create_background_task(
+        _run_job(hass, job, method, configuration, addon_slug, extra),
+        name=f"esphome_mcp_bridge_{kind}_{job.id}",
+    )
+    response = job.to_dict()
+    response["note"] = (
+        "Started in the background. Poll esphome_job_status with this job_id "
+        "(optionally with wait_seconds) until status is 'done' or 'error'."
+    )
+    return response
+
+
 # --------------------------------------------------------------------------- #
 # Discovery / inventory tools
 # --------------------------------------------------------------------------- #
@@ -296,11 +349,9 @@ class ReadYamlTool(llm.Tool):
 
     name = "esphome_read_yaml"
     description = (
-        "Read the contents of a file from /config/esphome - typically an ESPHome "
-        "YAML configuration. Use this to inspect an existing device "
-        "configuration. If extra file access is enabled in the integration "
-        "options, you may also read non-YAML files and use relative subdirectory "
-        "paths (e.g. components/my_component/sensor.h)."
+        "Read a file from /config/esphome (typically an ESPHome YAML config) to "
+        "inspect it. With extra file access enabled, non-YAML files and "
+        "subdirectory paths (e.g. components/my_component/sensor.h) also work."
     )
     parameters = vol.Schema({vol.Required("filename"): str})
 
@@ -329,13 +380,10 @@ class CreateConfigTool(llm.Tool):
 
     name = "esphome_create_config"
     description = (
-        "Create a new ESPHome YAML configuration file in /config/esphome. Fails "
-        "if a file with that name already exists - use esphome_write_yaml to "
-        "modify an existing configuration. If extra file access is enabled in the "
-        "integration options, you may also create non-YAML files (e.g. C++ for a "
-        "custom component) and use relative subdirectory paths such as "
-        "components/my_component/sensor.h; any missing parent directories are "
-        "created."
+        "Create a new ESPHome YAML config in /config/esphome; fails if it already "
+        "exists (use esphome_write_yaml to modify). With extra file access "
+        "enabled, also creates non-YAML files and subdirectory paths (e.g. C++ in "
+        "components/my_component/); missing parent dirs are created."
     )
     parameters = vol.Schema(
         {
@@ -372,12 +420,10 @@ class WriteYamlTool(llm.Tool):
 
     name = "esphome_write_yaml"
     description = (
-        "Write or overwrite an ESPHome YAML configuration file in "
-        "/config/esphome. Validate or compile afterward to confirm the change. "
-        "If extra file access is enabled in the integration options, you may also "
-        "write non-YAML files (e.g. C++ for a custom component) and use relative "
-        "subdirectory paths such as components/my_component/sensor.h; any missing "
-        "parent directories are created."
+        "Write or overwrite an ESPHome YAML config in /config/esphome; validate "
+        "or compile afterward to confirm. With extra file access enabled, also "
+        "writes non-YAML files and subdirectory paths (e.g. C++ in "
+        "components/my_component/); missing parent dirs are created."
     )
     parameters = vol.Schema(
         {
@@ -463,6 +509,7 @@ class _BuildTool(llm.Tool):
 
     # Subclasses set: name, description, _method (DashboardClient coroutine name).
     _method: str = ""
+    _supports_background: bool = False
     parameters = vol.Schema(
         {
             vol.Required("configuration"): str,
@@ -478,6 +525,11 @@ class _BuildTool(llm.Tool):
             configuration = _guard(args["configuration"], require_yaml=True)
         except ValueError as err:
             return {"error": str(err)}
+        if self._supports_background and args.get("background"):
+            return _start_background_job(
+                hass, self._method, self._method, configuration,
+                args.get("addon_slug"), {},
+            )
         try:
             client, slug = await _async_dashboard(hass, args.get("addon_slug"))
             result = await getattr(client, self._method)(configuration)
@@ -507,9 +559,19 @@ class CompileTool(_BuildTool):
     description = (
         "Compile an ESPHome configuration into firmware. Returns the build log "
         "and exit code (0 = success). Compilation runs to completion before the "
-        "result is returned."
+        "result is returned. For a slow first build (which downloads a toolchain "
+        "and can exceed the client timeout), pass background=true to get a job_id "
+        "immediately, then poll esphome_job_status."
     )
     _method = "compile"
+    _supports_background = True
+    parameters = vol.Schema(
+        {
+            vol.Required("configuration"): str,
+            vol.Optional("background", default=False): bool,
+            _ADDON_SLUG: str,
+        }
+    )
 
 
 class CleanTool(_BuildTool):
@@ -531,6 +593,7 @@ class _FlashTool(llm.Tool):
         {
             vol.Required("configuration"): str,
             vol.Optional("port", default="OTA"): str,
+            vol.Optional("background", default=False): bool,
             _ADDON_SLUG: str,
         }
     )
@@ -544,6 +607,11 @@ class _FlashTool(llm.Tool):
         except ValueError as err:
             return {"error": str(err)}
         port = args.get("port", "OTA")
+        if args.get("background"):
+            return _start_background_job(
+                hass, self._method, self._method, configuration,
+                args.get("addon_slug"), {"port": port},
+            )
         try:
             client, slug = await _async_dashboard(hass, args.get("addon_slug"))
             result = await getattr(client, self._method)(configuration, port)
@@ -561,7 +629,8 @@ class UploadTool(_FlashTool):
     description = (
         "Upload (flash) firmware for an ESPHome configuration to a device. "
         "'port' defaults to 'OTA' (over-the-air); pass a device IP/hostname or "
-        "serial port to target it explicitly. Returns the upload log and exit code."
+        "serial port to target it explicitly. Returns the upload log and exit "
+        "code. Pass background=true to run as a job and poll esphome_job_status."
     )
     _method = "upload"
 
@@ -573,7 +642,8 @@ class RunTool(_FlashTool):
     description = (
         "Compile an ESPHome configuration AND upload it to the device in one "
         "step (the equivalent of the dashboard 'Install' action). 'port' "
-        "defaults to 'OTA'. Returns the combined build + upload log."
+        "defaults to 'OTA'. Returns the combined build + upload log. Pass "
+        "background=true to run as a job and poll esphome_job_status."
     )
     _method = "run"
 
@@ -678,6 +748,39 @@ class LogsTool(llm.Tool):
         return response
 
 
+class JobStatusTool(llm.Tool):
+    """Poll the status and output of a background build job."""
+
+    name = "esphome_job_status"
+    description = (
+        "Check a background ESPHome job (compile/upload/run started with "
+        "background=true). Returns status ('running'/'done'/'error'), exit code, "
+        "and the build output captured so far. Optionally set 'wait_seconds' to "
+        "block until the job finishes (up to that many seconds) before returning."
+    )
+    parameters = vol.Schema(
+        {
+            vol.Required("job_id"): str,
+            vol.Optional("wait_seconds", default=0): vol.All(
+                vol.Coerce(float), vol.Range(min=0, max=120)
+            ),
+        }
+    )
+
+    async def async_call(
+        self, hass: HomeAssistant, tool_input: llm.ToolInput, llm_context: llm.LLMContext
+    ) -> dict[str, Any]:
+        job_id = tool_input.tool_args["job_id"]
+        job = _job_registry(hass).get(job_id)
+        if job is None:
+            return {"error": f"No job with id {job_id!r} (it may have expired)."}
+        wait = tool_input.tool_args.get("wait_seconds", 0)
+        deadline = time.monotonic() + wait
+        while not job.is_finished and time.monotonic() < deadline:
+            await asyncio.sleep(min(2.0, max(0.1, deadline - time.monotonic())))
+        return job.to_dict()
+
+
 # --------------------------------------------------------------------------- #
 # The API
 # --------------------------------------------------------------------------- #
@@ -727,6 +830,7 @@ class ESPHomeBuilderAPI(llm.API):
             UploadTool(),
             RunTool(),
             LogsTool(),
+            JobStatusTool(),
         ]
         api_prompt = _API_PROMPT
         if _allow_extra_files(self.hass):
