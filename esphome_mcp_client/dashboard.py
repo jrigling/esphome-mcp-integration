@@ -59,22 +59,31 @@ class CommandResult:
 
 
 # Endpoints the new ESPHome Device Builder does NOT expose over its legacy API
-# (only /compile and /upload remain). Requesting these returns the SPA index
-# (HTTP 200) instead of a WebSocket upgrade.
+# (only /compile and /upload remain). Hitting the add-on directly, these return
+# the SPA index (HTTP 200) instead of a WebSocket upgrade. Through the Supervisor
+# ingress proxy the signature differs: the proxy upgrades the client-side socket
+# before it sees the upstream 200, so the handshake "succeeds" and the socket is
+# then closed immediately with no output. Both cases are handled below.
 _DEVICE_BUILDER_MISSING = {"/validate", "/logs", "/clean", "/run"}
+
+
+def _device_builder_missing_message(path: str) -> str:
+    """Actionable message for an endpoint the Device Builder no longer exposes."""
+    endpoint = path.lstrip("/")
+    return (
+        f"The '{endpoint}' endpoint is not available on this ESPHome add-on. It is "
+        "running the new ESPHome Device Builder, whose API does not expose "
+        f"'{endpoint}' (only compile and upload remain on the legacy interface). "
+        "Workarounds: run a compile to surface configuration errors, and use the "
+        "ESPHome dashboard UI (or device-direct logs) for live logs."
+    )
 
 
 def _handshake_error(path: str, err: aiohttp.WSServerHandshakeError) -> str:
     """Turn a non-upgrade WebSocket handshake into an actionable message."""
     endpoint = path.lstrip("/")
     if err.status == 200 and path in _DEVICE_BUILDER_MISSING:
-        return (
-            f"The '{endpoint}' endpoint did not upgrade to a WebSocket (HTTP 200). "
-            "This ESPHome add-on is running the new ESPHome Device Builder, whose "
-            f"API does not expose '{endpoint}' (only compile and upload remain on "
-            "the legacy interface). Workarounds: run a compile to surface "
-            "configuration errors, and use the ESPHome dashboard UI for live logs."
-        )
+        return _device_builder_missing_message(path)
     if err.status == 200:
         return (
             f"The '{endpoint}' endpoint returned HTTP 200 without a WebSocket "
@@ -280,6 +289,18 @@ class DashboardClient:
             raise DashboardError(_handshake_error(path, err)) from err
         except aiohttp.ClientError as err:
             raise DashboardError(f"WS {path} failed: {err}") from err
+
+        # Through the Supervisor ingress proxy a missing Device Builder endpoint
+        # upgrades (proxy-side) and is then closed immediately with no frames, so
+        # the handshake never raises. Detect that empty close and surface the same
+        # actionable message the direct HTTP-200 case gets.
+        if (
+            path in _DEVICE_BUILDER_MISSING
+            and result.exit_code is None
+            and not result.lines
+            and not result.truncated
+        ):
+            raise DashboardError(_device_builder_missing_message(path))
         return result
 
     async def compile(

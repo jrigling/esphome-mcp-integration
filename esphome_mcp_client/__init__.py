@@ -15,6 +15,7 @@ from .exceptions import (
     DeviceLogError,
     ESPHomeMCPError,
     SupervisorError,
+    WsUnavailableError,
 )
 from .supervisor import (
     AddonInfo,
@@ -22,8 +23,9 @@ from .supervisor import (
     DashboardTarget,
     SupervisorClient,
 )
+from .ws_client import WsClient
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     "AddonInfo",
@@ -37,6 +39,8 @@ __all__ = [
     "ESPHomeMCPError",
     "SupervisorClient",
     "SupervisorError",
+    "WsClient",
+    "WsUnavailableError",
     "async_stream_device_logs",
     "__version__",
 ]

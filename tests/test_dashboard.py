@@ -117,6 +117,45 @@ async def test_ws_non_upgrade_gives_actionable_error(serve, session):
     assert "compile" in msg
 
 
+async def test_ws_immediate_close_gives_actionable_error(serve, session):
+    """Through the Supervisor ingress proxy a missing endpoint upgrades and is
+    then closed immediately with no output. The client must still explain it,
+    not return a silent empty result."""
+
+    async def ws_upgrade_then_close(request):
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+        await ws.receive()  # the client's spawn frame
+        await ws.close()  # ...then close with no line/exit frames
+        return ws
+
+    base = await serve(make_app([("GET", "/validate", ws_upgrade_then_close)]))
+    client = DashboardClient(session, base)
+    with pytest.raises(DashboardError) as exc:
+        await client.validate("kitchen.yaml", max_seconds=5)
+    msg = str(exc.value)
+    assert "Device Builder" in msg
+    assert "compile" in msg
+
+
+async def test_ws_immediate_close_ok_for_supported_endpoint(serve, session):
+    """A supported endpoint (/compile) that closes with no output must NOT be
+    misreported as missing — it returns an empty result, not an error."""
+
+    async def ws_upgrade_then_close(request):
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+        await ws.receive()
+        await ws.close()
+        return ws
+
+    base = await serve(make_app([("GET", "/compile", ws_upgrade_then_close)]))
+    client = DashboardClient(session, base)
+    result = await client.compile("kitchen.yaml", max_seconds=5)
+    assert result.exit_code is None
+    assert result.lines == []
+
+
 async def test_compile_streams_lines_via_on_line(serve, session):
     """Build commands forward each output line to the on_line callback as it
     arrives (used to feed a background job live), and still collect them."""

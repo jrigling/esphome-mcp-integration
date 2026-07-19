@@ -32,6 +32,8 @@ from esphome_mcp_client import (
     DeviceLogError,
     ESPHomeMCPError,
     SupervisorClient,
+    WsClient,
+    WsUnavailableError,
     async_stream_device_logs,
 )
 
@@ -150,10 +152,13 @@ def _insert_secret(path: str, key: str, value: str) -> None:
         fh.write(f"{prefix}{key}: {json.dumps(value)}\n")
 
 
-async def _async_dashboard(
-    hass: HomeAssistant, slug: str | None
-) -> tuple[DashboardClient, str]:
-    """Build a dashboard client for the chosen (or default) ESPHome add-on."""
+async def _async_connection(hass: HomeAssistant, slug: str | None):
+    """Resolve the add-on and open a dashboard connection (base URL + auth).
+
+    Shared by :func:`_async_dashboard` (legacy REST + WS spawn) and
+    :func:`_async_build_client` (the multiplexed ``/ws`` API); both talk to the
+    same add-on over the same Supervisor-ingress connection.
+    """
     token = os.environ.get("SUPERVISOR_TOKEN")
     if not token:
         raise ESPHomeMCPError(
@@ -176,7 +181,64 @@ async def _async_dashboard(
         target = await supervisor.async_dashboard_target(slug)
         cache[slug] = target
     conn = await supervisor.open_dashboard_connection(target)
+    return session, conn, slug
+
+
+async def _async_dashboard(
+    hass: HomeAssistant, slug: str | None
+) -> tuple[DashboardClient, str]:
+    """Legacy dashboard client (REST inventory/config + WS spawn) for an add-on."""
+    session, conn, slug = await _async_connection(hass, slug)
     return DashboardClient(session, conn.base_url, headers=conn.headers), slug
+
+
+class _BuildClient:
+    """Runs a build/stream op on the Device Builder ``/ws`` API, falling back to
+    the legacy WS spawn endpoints for a classic dashboard that lacks ``/ws``.
+
+    Exposes the same method names/signatures as both underlying clients, so the
+    build tools and background jobs can dispatch by name unchanged.
+    """
+
+    def __init__(self, ws: WsClient, legacy: DashboardClient) -> None:
+        self._ws = ws
+        self._legacy = legacy
+
+    async def _dispatch(self, method: str, *args: Any, **kwargs: Any):
+        try:
+            return await getattr(self._ws, method)(*args, **kwargs)
+        except WsUnavailableError:
+            # Classic dashboard: /ws isn't there. The failure happens at connect
+            # time (before any output), so retrying on legacy can't duplicate.
+            return await getattr(self._legacy, method)(*args, **kwargs)
+
+    async def compile(self, *args: Any, **kwargs: Any):
+        return await self._dispatch("compile", *args, **kwargs)
+
+    async def upload(self, *args: Any, **kwargs: Any):
+        return await self._dispatch("upload", *args, **kwargs)
+
+    async def clean(self, *args: Any, **kwargs: Any):
+        return await self._dispatch("clean", *args, **kwargs)
+
+    async def run(self, *args: Any, **kwargs: Any):
+        return await self._dispatch("run", *args, **kwargs)
+
+    async def validate(self, *args: Any, **kwargs: Any):
+        return await self._dispatch("validate", *args, **kwargs)
+
+    async def logs(self, *args: Any, **kwargs: Any):
+        return await self._dispatch("logs", *args, **kwargs)
+
+
+async def _async_build_client(
+    hass: HomeAssistant, slug: str | None
+) -> tuple[_BuildClient, str]:
+    """Build/stream client for an add-on: /ws primary, legacy spawn fallback."""
+    session, conn, slug = await _async_connection(hass, slug)
+    ws = WsClient(session, conn.base_url, headers=conn.headers)
+    legacy = DashboardClient(session, conn.base_url, headers=conn.headers)
+    return _BuildClient(ws, legacy), slug
 
 
 def _result_to_dict(slug: str, configuration: str, result: Any) -> dict[str, Any]:
@@ -243,7 +305,7 @@ async def _run_job(
 ) -> None:
     """Background driver: run a build command, streaming lines into the job."""
     try:
-        client, _ = await _async_dashboard(hass, addon_slug)
+        client, _ = await _async_build_client(hass, addon_slug)
         result = await getattr(client, method)(
             configuration, on_line=job.lines.append, **extra
         )
@@ -536,7 +598,7 @@ class _BuildTool(llm.Tool):
                 args.get("addon_slug"), {},
             )
         try:
-            client, slug = await _async_dashboard(hass, args.get("addon_slug"))
+            client, slug = await _async_build_client(hass, args.get("addon_slug"))
             result = await getattr(client, self._method)(configuration)
         except ESPHomeMCPError as err:
             return {"error": str(err)}
@@ -548,11 +610,9 @@ class ValidateTool(_BuildTool):
 
     name = "esphome_validate"
     description = (
-        "Validate an ESPHome configuration file. Returns the validator output "
-        "and exit code (0 = valid). Run this after editing, before compiling. "
-        "Note: the newer ESPHome Device Builder add-on does not expose standalone "
-        "validation; if this reports it's unavailable, run esphome_compile, which "
-        "also validates."
+        "Validate an ESPHome configuration file without building it. Returns the "
+        "validator output and exit code (0 = valid). Run this after editing, "
+        "before compiling — it's much faster than a full compile."
     )
     _method = "validate"
 
@@ -618,7 +678,7 @@ class _FlashTool(llm.Tool):
                 args.get("addon_slug"), {"port": port},
             )
         try:
-            client, slug = await _async_dashboard(hass, args.get("addon_slug"))
+            client, slug = await _async_build_client(hass, args.get("addon_slug"))
             result = await getattr(client, self._method)(configuration, port)
         except ESPHomeMCPError as err:
             return {"error": str(err)}
@@ -729,7 +789,8 @@ class LogsTool(llm.Tool):
                 response["address"] = host
                 return response
 
-        # 2. Dashboard fallback (classic dashboard only).
+        # 2. Dashboard fallback: /ws devices/logs on the Device Builder, or the
+        #    legacy /logs spawn on a classic dashboard (handled by _BuildClient).
         if dash_client is None:
             return {
                 "error": device_error
@@ -737,7 +798,8 @@ class LogsTool(llm.Tool):
                 "in Home Assistant for direct log streaming."
             }
         try:
-            result = await dash_client.logs(configuration, "OTA", max_seconds=max_seconds)
+            build_client, _ = await _async_build_client(hass, addon_slug)
+            result = await build_client.logs(configuration, "OTA", max_seconds=max_seconds)
         except ESPHomeMCPError as err:
             msg = str(err)
             if device_error:
