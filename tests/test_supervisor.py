@@ -3,6 +3,7 @@ import aiohttp
 import pytest
 
 from esphome_mcp_client import AddonNotFoundError, SupervisorClient
+from esphome_mcp_client.supervisor import DashboardTarget
 
 from .conftest import json_route, make_app
 
@@ -47,21 +48,62 @@ async def test_default_slug_raises_when_none_installed(serve, session):
         await client.async_default_slug()
 
 
-async def test_get_dashboard_base_url_uses_hostname_and_port(serve, session):
-    info = {"result": "ok", "data": {"hostname": "5c53de3b-esphome", "ingress_port": 6052}}
+async def test_dashboard_target_uses_ingress_proxy_when_available(serve, session):
+    # An add-on with ingress advertises ``ingress_entry`` as a path whose last
+    # segment is the token; the target must route through /ingress/<token>.
+    info = {
+        "result": "ok",
+        "data": {
+            "hostname": "5c53de3b-esphome",
+            "ingress_port": 62513,
+            "ingress_entry": "/api/hassio_ingress/aBcD-token-123",
+        },
+    }
     base = await serve(
         make_app([("GET", "/addons/5c53de3b_esphome/info", json_route(info))])
     )
     client = SupervisorClient(session, token="tok", base_url=base)
-    url = await client.get_dashboard_base_url("5c53de3b_esphome")
-    assert url == "http://5c53de3b-esphome:6052"
+    target = await client.async_dashboard_target("5c53de3b_esphome")
+    assert target == DashboardTarget(
+        base_url=f"{base}/ingress/aBcD-token-123",
+        ingress_token="aBcD-token-123",
+    )
 
 
-async def test_get_dashboard_base_url_falls_back_to_default_port(serve, session):
+async def test_dashboard_target_falls_back_to_direct_without_ingress(serve, session):
+    # No ingress_entry -> classic dashboard, reachable directly on its port.
     info = {"result": "ok", "data": {"hostname": "5c53de3b-esphome", "ingress_port": 0}}
     base = await serve(
         make_app([("GET", "/addons/5c53de3b_esphome/info", json_route(info))])
     )
     client = SupervisorClient(session, token="tok", base_url=base)
-    url = await client.get_dashboard_base_url("5c53de3b_esphome")
-    assert url == "http://5c53de3b-esphome:6052"
+    target = await client.async_dashboard_target("5c53de3b_esphome")
+    assert target == DashboardTarget(
+        base_url="http://5c53de3b-esphome:6052", ingress_token=None
+    )
+
+
+async def test_create_ingress_session_returns_id(serve, session):
+    payload = {"result": "ok", "data": {"session": "sess-xyz"}}
+    base = await serve(make_app([("POST", "/ingress/session", json_route(payload))]))
+    client = SupervisorClient(session, token="tok", base_url=base)
+    assert await client.create_ingress_session() == "sess-xyz"
+
+
+async def test_open_connection_mints_session_cookie_for_proxy(serve, session):
+    payload = {"result": "ok", "data": {"session": "sess-xyz"}}
+    base = await serve(make_app([("POST", "/ingress/session", json_route(payload))]))
+    client = SupervisorClient(session, token="tok", base_url=base)
+    target = DashboardTarget(base_url=f"{base}/ingress/tok123", ingress_token="tok123")
+    conn = await client.open_dashboard_connection(target)
+    assert conn.base_url == f"{base}/ingress/tok123"
+    assert conn.headers == {"Cookie": "ingress_session=sess-xyz"}
+
+
+async def test_open_connection_direct_target_has_no_auth(serve, session):
+    # Direct targets need no ingress session; no /ingress/session call is made.
+    client = SupervisorClient(session, token="tok", base_url="http://unused")
+    target = DashboardTarget(base_url="http://5c53de3b-esphome:6052", ingress_token=None)
+    conn = await client.open_dashboard_connection(target)
+    assert conn.base_url == "http://5c53de3b-esphome:6052"
+    assert conn.headers == {}

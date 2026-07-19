@@ -141,6 +141,37 @@ async def test_compile_streams_lines_via_on_line(serve, session):
     assert seen == ["Compiling...", "Linking...", "Done"]
 
 
+async def test_headers_are_sent_on_rest_and_ws(serve, session):
+    """The ingress-session cookie must ride on both REST and WebSocket calls,
+    or the Supervisor ingress proxy rejects them."""
+    seen: dict[str, str | None] = {}
+
+    async def devices(request):
+        seen["rest"] = request.headers.get("Cookie")
+        return web.json_response({"configured": [], "importable": []})
+
+    async def ws_spawn(request):
+        seen["ws"] = request.headers.get("Cookie")
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+        await ws.receive()
+        await ws.send_json({"event": "exit", "code": 0})
+        await ws.close()
+        return ws
+
+    base = await serve(
+        make_app([("GET", "/devices", devices), ("GET", "/compile", ws_spawn)])
+    )
+    client = DashboardClient(
+        session, base, headers={"Cookie": "ingress_session=sess-xyz"}
+    )
+    await client.list_devices()
+    await client.compile("kitchen.yaml", max_seconds=5)
+
+    assert seen["rest"] == "ingress_session=sess-xyz"
+    assert seen["ws"] == "ingress_session=sess-xyz"
+
+
 def test_command_result_success_and_output():
     ok = CommandResult(lines=["compiling", "done"], exit_code=0)
     assert ok.success is True

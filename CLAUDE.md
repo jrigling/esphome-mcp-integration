@@ -28,7 +28,7 @@ Tests use `aioresponses` to mock HTTP; they cover the client library only (no HA
 
 `esphome_mcp_client` is transport-only and HA-agnostic so it can be unit-tested and reused:
 
-- `supervisor.py` — `SupervisorClient`: discovers ESPHome add-ons via `GET /addons` (matches any slug/name containing `esphome`), ranks them stable > beta > dev (running preferred), and resolves each add-on's internal dashboard base URL (`http://<hostname>:<ingress_port>`) from `GET /addons/{slug}/info`. Falls back to port 6052.
+- `supervisor.py` — `SupervisorClient`: discovers ESPHome add-ons via `GET /addons` (matches any slug/name containing `esphome`), ranks them stable > beta > dev (running preferred), and resolves how to reach each add-on's dashboard via `async_dashboard_target` (from `GET /addons/{slug}/info`). Preferred path is the **Supervisor ingress proxy** (`http://supervisor/ingress/<token>/…`, token = last segment of `ingress_entry`), because the new Device Builder peer-guards its ingress port to loopback + Supervisor only — direct `hostname:ingress_port` access 403s. `open_dashboard_connection` mints a per-call `ingress_session` cookie via `POST /ingress/session`. Falls back to direct `hostname:ingress_port` (port 6052 default) for add-ons without ingress.
 - `dashboard.py` — `DashboardClient`: talks the **legacy** ESPHome dashboard protocol (supported by both the classic dashboard and the new Device Builder). REST for `/devices`, `/ping`, `/edit`, `/json-config`; WebSocket "spawn" protocol for `/compile|/validate|/clean|/upload|/run|/logs`.
 
 The integration's `llm.py` wraps the client in `llm.Tool` subclasses. `async_setup_entry` registers `ESPHomeBuilderAPI` and ties the returned unregister callback to the entry via `entry.async_on_unload`. Installation is UI-only: a confirm-only, single-instance config flow (`config_flow.py`) — there is no YAML setup and no `async_setup`.
@@ -80,4 +80,4 @@ Order matters when both change: release the client (`client-v*`) **first** so th
 
 ## Networking caveat
 
-The dashboard base URL relies on the add-on being reachable by its Supervisor-reported `hostname:ingress_port` from the HA Core container. If an ESPHome add-on runs on host networking, this may need adjustment — verify at runtime against a real install.
+Dashboard traffic is routed through the Supervisor ingress proxy (see `supervisor.py`), so the add-on sees the Supervisor as the TCP peer and its ingress peer guard is satisfied. Session creation (`POST /ingress/session`) requires the caller's `SUPERVISOR_TOKEN` to be Home Assistant's own token — true for HA Core, which is where this integration runs. The `dashboard_target_cache` in `llm.py` caches the stable (base_url, ingress_token) per slug; if an add-on is reinstalled its token changes, so a HA restart (which clears the cache) is the recovery path. The direct `hostname:ingress_port` fallback remains for classic dashboards without a peer guard.

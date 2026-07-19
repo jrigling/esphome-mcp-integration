@@ -28,6 +28,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from esphome_mcp_client import (
     DashboardClient,
+    DashboardTarget,
     DeviceLogError,
     ESPHomeMCPError,
     SupervisorClient,
@@ -164,14 +165,18 @@ async def _async_dashboard(
     if not slug:
         slug = await supervisor.async_default_slug()
 
-    cache: dict[str, str] = hass.data.setdefault(DOMAIN, {}).setdefault(
-        "base_url_cache", {}
+    # The target (base URL + ingress token) is stable, so cache it; the ingress
+    # session it carries is not, so mint a fresh one per call in
+    # open_dashboard_connection.
+    cache: dict[str, DashboardTarget] = hass.data.setdefault(DOMAIN, {}).setdefault(
+        "dashboard_target_cache", {}
     )
-    base_url = cache.get(slug)
-    if base_url is None:
-        base_url = await supervisor.get_dashboard_base_url(slug)
-        cache[slug] = base_url
-    return DashboardClient(session, base_url), slug
+    target = cache.get(slug)
+    if target is None:
+        target = await supervisor.async_dashboard_target(slug)
+        cache[slug] = target
+    conn = await supervisor.open_dashboard_connection(target)
+    return DashboardClient(session, conn.base_url, headers=conn.headers), slug
 
 
 def _result_to_dict(slug: str, configuration: str, result: Any) -> dict[str, Any]:

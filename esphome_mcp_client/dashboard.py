@@ -86,15 +86,27 @@ def _handshake_error(path: str, err: aiohttp.WSServerHandshakeError) -> str:
 class DashboardClient:
     """Async client bound to one ESPHome dashboard base URL.
 
-    ``base_url`` is the internal HTTP URL of the dashboard, e.g.
-    ``http://5c53de3b-esphome:6052`` (see
-    :meth:`SupervisorClient.get_dashboard_base_url`).
+    ``base_url`` and ``headers`` come from
+    :meth:`SupervisorClient.open_dashboard_connection`: usually the Supervisor
+    ingress proxy (``http://supervisor/ingress/<token>``) plus an
+    ``ingress_session`` cookie, or a direct ``http://<hostname>:<port>`` URL
+    with no headers for a classic dashboard.
     """
 
-    def __init__(self, session: aiohttp.ClientSession, base_url: str) -> None:
+    def __init__(
+        self,
+        session: aiohttp.ClientSession,
+        base_url: str,
+        *,
+        headers: dict[str, str] | None = None,
+    ) -> None:
         self._session = session
         self._http_base = base_url.rstrip("/")
         self._ws_base = "ws" + self._http_base[len("http"):]
+        # Applied to every REST and WebSocket request. Carries the
+        # ``ingress_session`` cookie when reaching the dashboard through the
+        # Supervisor ingress proxy; empty for direct access.
+        self._headers = dict(headers or {})
 
     # ---- REST -------------------------------------------------------------
 
@@ -102,7 +114,10 @@ class DashboardClient:
         url = f"{self._http_base}{path}"
         try:
             async with self._session.get(
-                url, params=params, timeout=aiohttp.ClientTimeout(total=30)
+                url,
+                params=params,
+                headers=self._headers,
+                timeout=aiohttp.ClientTimeout(total=30),
             ) as resp:
                 resp.raise_for_status()
                 return await resp.json()
@@ -178,6 +193,7 @@ class DashboardClient:
             async with self._session.get(
                 url,
                 params={"configuration": configuration},
+                headers=self._headers,
                 timeout=aiohttp.ClientTimeout(total=30),
             ) as resp:
                 resp.raise_for_status()
@@ -193,6 +209,7 @@ class DashboardClient:
                 url,
                 params={"configuration": configuration},
                 data=content.encode("utf-8"),
+                headers=self._headers,
                 timeout=aiohttp.ClientTimeout(total=30),
             ) as resp:
                 resp.raise_for_status()
@@ -221,7 +238,7 @@ class DashboardClient:
         try:
             # Receive deadlines are enforced per-message below, so we rely on
             # ws_connect's default close timeout (portable across aiohttp 3.x).
-            async with self._session.ws_connect(url) as ws:
+            async with self._session.ws_connect(url, headers=self._headers) as ws:
                 await ws.send_json(spawn)
                 while True:
                     remaining = deadline - loop.time()

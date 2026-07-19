@@ -16,16 +16,23 @@ from .exceptions import (
     ESPHomeMCPError,
     SupervisorError,
 )
-from .supervisor import AddonInfo, SupervisorClient
+from .supervisor import (
+    AddonInfo,
+    DashboardConnection,
+    DashboardTarget,
+    SupervisorClient,
+)
 
-__version__ = "0.1.3"
+__version__ = "0.2.0"
 
 __all__ = [
     "AddonInfo",
     "AddonNotFoundError",
     "CommandResult",
     "DashboardClient",
+    "DashboardConnection",
     "DashboardError",
+    "DashboardTarget",
     "DeviceLogError",
     "ESPHomeMCPError",
     "SupervisorClient",
