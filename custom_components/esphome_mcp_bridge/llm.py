@@ -940,6 +940,13 @@ def _log_response(
                 f"Received {flt.lines_received} log lines but none matched the "
                 "filters; loosen level/tags/search or set include_config_dump."
             )
+        elif mode == "device" and flt.min_level < LOG_LEVELS["very_verbose"]:
+            level = flt.describe()["level"]
+            response["note"] = (
+                f"The device sent no log lines at level '{level}' or more severe in "
+                f"{max_seconds:g}s (the level is applied on the device). Lower or "
+                "drop 'level' to see more."
+            )
         elif mode == "device":
             response["note"] = (
                 f"The device sent no log lines in {max_seconds:g}s. It may be idle "

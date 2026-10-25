@@ -217,6 +217,15 @@ async def test_idle_device_gets_an_explanatory_note(wire):
     assert "sent no log lines" in resp["note"]
 
 
+async def test_idle_with_level_filter_explains_the_level(wire):
+    # Seen live: woodfire logs only at debug, so level=info yields nothing at all.
+    wire(device_messages=[])
+    resp = await logs(FakeHass([RACE_ENTRY]), configuration="thingy-race.yaml",
+                      max_seconds=1, level="info")
+    assert "level 'info'" in resp["note"]
+    assert "idle" not in resp["note"]
+
+
 async def test_nothing_matched_note(wire):
     wire(device_messages=[dev("D", "wifi", "x")])
     resp = await logs(FakeHass([RACE_ENTRY]), configuration="thingy-race.yaml",
