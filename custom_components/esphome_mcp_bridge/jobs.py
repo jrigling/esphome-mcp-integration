@@ -8,9 +8,11 @@ Assistant imports so it can be unit-tested directly.
 """
 from __future__ import annotations
 
+import asyncio
 import time
 import uuid
 from dataclasses import dataclass, field
+from typing import Any
 
 # Keep the registry bounded.
 MAX_JOBS = 50
@@ -24,7 +26,7 @@ class Job:
     """A single background build job and its accumulating output."""
 
     id: str
-    kind: str  # compile | upload | run | validate | clean
+    kind: str  # compile | upload | run | logs
     configuration: str
     addon_slug: str | None = None
     status: str = "running"  # running | done | error
@@ -34,10 +36,19 @@ class Job:
     error: str | None = None
     created_at: float = field(default_factory=time.time)
     finished_at: float | None = None
+    # Set for jobs that can be ended early (log captures); setting it asks the
+    # job to finish with what it has collected so far.
+    stop_event: asyncio.Event | None = field(default=None, repr=False)
+    # Kind-specific result fields merged into the status response.
+    details: dict[str, Any] = field(default_factory=dict)
 
     @property
     def is_finished(self) -> bool:
         return self.status != "running"
+
+    @property
+    def stoppable(self) -> bool:
+        return self.stop_event is not None
 
     def to_dict(self, *, max_output_lines: int = MAX_OUTPUT_LINES) -> dict:
         tail = self.lines[-max_output_lines:]
@@ -53,6 +64,7 @@ class Job:
             "output_truncated": self.truncated or len(self.lines) > len(tail),
             "output": "\n".join(tail),
             "error": self.error,
+            **self.details,
         }
 
 
@@ -62,13 +74,21 @@ class JobRegistry:
     def __init__(self) -> None:
         self._jobs: dict[str, Job] = {}
 
-    def create(self, kind: str, configuration: str, addon_slug: str | None) -> Job:
+    def create(
+        self,
+        kind: str,
+        configuration: str,
+        addon_slug: str | None,
+        *,
+        stoppable: bool = False,
+    ) -> Job:
         self._prune()
         job = Job(
             id=uuid.uuid4().hex,
             kind=kind,
             configuration=configuration,
             addon_slug=addon_slug,
+            stop_event=asyncio.Event() if stoppable else None,
         )
         self._jobs[job.id] = job
         return job

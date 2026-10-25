@@ -93,3 +93,27 @@ def test_eviction_caps_total_by_evicting_oldest_finished():
     # The very oldest finished jobs are the ones evicted; newest retained.
     assert reg.get(created[0].id) is None
     assert reg.get(created[-1].id) is not None
+
+
+def test_jobs_are_not_stoppable_by_default():
+    job = jobs.JobRegistry().create("compile", "kitchen.yaml", None)
+    assert job.stoppable is False
+    assert job.stop_event is None
+
+
+def test_stoppable_job_has_its_own_stop_event():
+    reg = jobs.JobRegistry()
+    a = reg.create("logs", "race.yaml", None, stoppable=True)
+    b = reg.create("logs", "race.yaml", None, stoppable=True)
+    assert a.stoppable and b.stoppable
+    a.stop_event.set()
+    assert not b.stop_event.is_set()
+
+
+def test_details_are_merged_into_status_and_stop_event_is_not():
+    job = jobs.JobRegistry().create("logs", "race.yaml", None, stoppable=True)
+    job.details.update({"mode": "device", "lines_received": 40})
+    status = job.to_dict()
+    assert status["mode"] == "device"
+    assert status["lines_received"] == 40
+    assert "stop_event" not in status

@@ -1,9 +1,11 @@
 """Tests for the dashboard client REST surface and result model."""
+import asyncio
+
 import aiohttp
 import pytest
 from aiohttp import web
 
-from esphome_mcp_client import DashboardClient, DashboardError
+from esphome_mcp_client import DashboardClient, DashboardError, LogFilter
 from esphome_mcp_client.dashboard import CommandResult
 
 from .conftest import json_route, make_app, status_route, text_route
@@ -224,3 +226,77 @@ def test_command_result_success_and_output():
 def test_ws_base_derived_from_http_base():
     client = DashboardClient(None, "http://host:6052")
     assert client._ws_base == "ws://host:6052"
+
+
+# ---- legacy /logs: filtering and early stop -----------------------------------
+
+
+def _spawn_logs(lines, *, forever=False, spawned=None):
+    async def handler(request):
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+        frame = await ws.receive()
+        if spawned is not None:
+            spawned.append(frame.json())
+        try:
+            for line in lines:
+                await ws.send_json({"event": "line", "data": line})
+            i = 0
+            while forever:
+                await asyncio.sleep(0.01)
+                await ws.send_json({"event": "line", "data": f"[D][tick:001]: {i}"})
+                i += 1
+        except (ConnectionResetError, RuntimeError):
+            pass
+        return ws
+
+    return handler
+
+
+async def test_logs_filters_and_cleans_lines(serve, session):
+    lines = [
+        r"[10:00:00.001]\033[0;35m[C][logger:250]: Logger:\033[0m",
+        r"[10:00:01.000]\033[0;36m[D][wifi:300]: scan\033[0m",
+        r"[10:00:02.000]\033[0;32m[I][race:045]: Lap 1\033[0m",
+    ]
+    spawned: list[dict] = []
+    base = await serve(make_app([("GET", "/logs", _spawn_logs(lines, spawned=spawned))]))
+    result = await DashboardClient(session, base).logs(
+        "race.yaml", max_seconds=0.5, line_filter=LogFilter(min_level=3)
+    )
+    assert result.lines == ["[10:00:02.000][I][race:045]: Lap 1"]
+    assert spawned == [{"type": "spawn", "configuration": "race.yaml", "port": "OTA"}]
+
+
+async def test_logs_accepts_no_states_and_ignores_it(serve, session):
+    spawned: list[dict] = []
+    base = await serve(make_app([("GET", "/logs", _spawn_logs(["[I][a:001]: x"], spawned=spawned))]))
+    await DashboardClient(session, base).logs("race.yaml", max_seconds=0.2, no_states=True)
+    assert "no_states" not in spawned[0]
+
+
+async def test_logs_stop_event_returns_early(serve, session):
+    base = await serve(make_app([("GET", "/logs", _spawn_logs(["[I][race:001]: go"], forever=True))]))
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    begin = loop.time()
+    result = await DashboardClient(session, base).logs(
+        "race.yaml", max_seconds=30, stop_event=stop,
+        on_line=lambda line: stop.set() if "go" in line else None,
+    )
+    assert loop.time() - begin < 5
+    assert result.lines[0] == "[I][race:001]: go"
+    assert result.truncated is True
+
+
+async def test_logs_missing_endpoint_still_raises(serve, session):
+    async def ws_upgrade_then_close(request):
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+        await ws.receive()
+        await ws.close()
+        return ws
+
+    base = await serve(make_app([("GET", "/logs", ws_upgrade_then_close)]))
+    with pytest.raises(DashboardError, match="Device Builder"):
+        await DashboardClient(session, base).logs("race.yaml", max_seconds=5)

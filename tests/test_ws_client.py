@@ -4,11 +4,13 @@ The fake speaks the real Device Builder framing (ServerInfo greeting on connect,
 CommandMessage in, Event/Result/Error out) so the client can't drift from the
 protocol it targets.
 """
+import asyncio
+
 import aiohttp
 import pytest
 from aiohttp import web
 
-from esphome_mcp_client import DashboardError, WsClient
+from esphome_mcp_client import DashboardError, LogFilter, WsClient
 
 from .conftest import make_app
 
@@ -198,3 +200,111 @@ async def test_non_ws_backend_gives_actionable_error(serve, session):
 def test_ws_url_appends_ws_path():
     client = WsClient(None, "http://supervisor/ingress/tok123")
     assert client._ws_url == "ws://supervisor/ingress/tok123/ws"
+
+
+# ---- logs: filtering, no_states, early stop -----------------------------------
+
+# What Device Builder relays from `esphome logs`: timestamp first, ESC printed
+# as the literal text "\033", a config dump at connect, then runtime logs.
+DASH_LOGS = [
+    "INFO Starting log output from 192.168.1.50 using esphome API",
+    r"[10:00:00.001]\033[0;35m[C][logger:250]: Logger:\033[0m",
+    r"[10:00:00.002]\033[0;35m[C][logger:251]:   Max Level: VERY_VERBOSE\033[0m",
+    r"[10:00:01.000]\033[0;36m[D][wifi:300]: scan\033[0m",
+    r"[10:00:02.000]\033[0;32m[I][race:045]: Lap 1\033[0m",
+    r"[10:00:03.000]\033[0;33m[W][esp32_ble_client:088]\033[1;31m[BTU]\033[0;33m: Disconnected\033[0m",
+    r"[10:00:04.000]\033[0;32m[I][race:045]: Lap 2\033[0m",
+]
+
+
+def _log_stream(lines, *, seen_args=None, closed=None, then_forever=False):
+    async def dispatch(ws, cmd):
+        assert cmd["command"] == "devices/logs"
+        if seen_args is not None:
+            seen_args.append(cmd["args"])
+        mid = cmd["message_id"]
+        try:
+            for line in lines:
+                await ws.send_json({"message_id": mid, "event": "output", "data": line})
+            i = 0
+            while then_forever:
+                await asyncio.sleep(0.01)
+                await ws.send_json({"message_id": mid, "event": "output",
+                                    "data": f"[D][tick:001]: {i}"})
+                i += 1
+        except (ConnectionResetError, RuntimeError):
+            pass
+        finally:
+            if closed is not None:
+                closed.set()
+
+    return dispatch
+
+
+async def test_logs_without_filter_cleans_but_keeps_everything(serve, session):
+    base = await serve(make_app([("GET", "/ws", _ws_route(_log_stream(DASH_LOGS)))]))
+    result = await WsClient(session, base).logs("race.yaml", max_seconds=0.5)
+    assert len(result.lines) == len(DASH_LOGS)
+    assert result.lines[1] == "[10:00:00.001][C][logger:250]: Logger:"
+    assert not any("\\033" in line for line in result.lines)
+
+
+async def test_logs_filter_by_tag_drops_config_dump_and_cleans(serve, session):
+    base = await serve(make_app([("GET", "/ws", _ws_route(_log_stream(DASH_LOGS)))]))
+    flt = LogFilter(tags=["race", "esp32_ble*"])
+    seen: list[str] = []
+    result = await WsClient(session, base).logs(
+        "race.yaml", max_seconds=0.5, line_filter=flt, on_line=seen.append
+    )
+    assert result.lines == [
+        "INFO Starting log output from 192.168.1.50 using esphome API",
+        "[10:00:02.000][I][race:045]: Lap 1",
+        "[10:00:03.000][W][esp32_ble_client:088][BTU]: Disconnected",
+        "[10:00:04.000][I][race:045]: Lap 2",
+    ]
+    assert seen == result.lines
+    assert flt.lines_received == len(DASH_LOGS)
+
+
+async def test_logs_max_lines_counts_kept_lines(serve, session):
+    noisy = [f"[D][wifi:001]: noise {i}" for i in range(200)] + ["[I][race:001]: hit"]
+    base = await serve(make_app([("GET", "/ws", _ws_route(_log_stream(noisy)))]))
+    result = await WsClient(session, base).logs(
+        "race.yaml", max_seconds=5, max_lines=1, line_filter=LogFilter(search="hit")
+    )
+    assert result.lines == ["[I][race:001]: hit"]
+    assert result.truncated is True
+
+
+async def test_logs_passes_no_states_only_when_set(serve, session):
+    seen_args: list[dict] = []
+    base = await serve(make_app([("GET", "/ws", _ws_route(_log_stream([], seen_args=seen_args)))]))
+    client = WsClient(session, base)
+    await client.logs("race.yaml", max_seconds=0.1)
+    await client.logs("race.yaml", "192.168.1.50", max_seconds=0.1, no_states=True)
+    assert seen_args == [
+        {"configuration": "race.yaml", "port": "OTA"},
+        {"configuration": "race.yaml", "port": "192.168.1.50", "no_states": True},
+    ]
+
+
+async def test_logs_stop_event_returns_early_and_closes_stream(serve, session):
+    closed = asyncio.Event()
+    base = await serve(make_app([("GET", "/ws", _ws_route(
+        _log_stream(["[I][race:001]: start"], closed=closed, then_forever=True)))]))
+    stop = asyncio.Event()
+
+    def on_line(line):
+        if "start" in line:
+            stop.set()
+
+    loop = asyncio.get_running_loop()
+    begin = loop.time()
+    result = await WsClient(session, base).logs(
+        "race.yaml", max_seconds=30, stop_event=stop, on_line=on_line
+    )
+    assert loop.time() - begin < 5
+    assert result.lines[0] == "[I][race:001]: start"
+    assert result.truncated is True
+    # Closing our socket ends the server-side stream.
+    await asyncio.wait_for(closed.wait(), 5)

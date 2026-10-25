@@ -26,12 +26,16 @@ import asyncio
 import json
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass, field
 
 import aiohttp
 from aiohttp import WSMsgType
 
+from .command import CommandResult
 from .exceptions import DashboardError
+from .log_capture import async_capture
+from .logtext import LogFilter
+
+__all__ = ["CommandResult", "DashboardClient"]
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -39,23 +43,9 @@ DEFAULT_MAX_LINES = 2000
 DEFAULT_BUILD_TIMEOUT = 600
 DEFAULT_LOG_SECONDS = 30
 DEFAULT_LOG_LINES = 500
-
-
-@dataclass
-class CommandResult:
-    """Outcome of a spawn-protocol WebSocket command."""
-
-    lines: list[str] = field(default_factory=list)
-    exit_code: int | None = None
-    truncated: bool = False
-
-    @property
-    def output(self) -> str:
-        return "\n".join(self.lines)
-
-    @property
-    def success(self) -> bool:
-        return self.exit_code == 0
+# Raw lines a log stream may produce before a filter has seen them; the kept
+# line count (``max_lines``) is enforced by the capture, not the stream.
+_RAW_LOG_LINE_CAP = 1_000_000
 
 
 # Endpoints the new ESPHome Device Builder does NOT expose over its legacy API
@@ -394,17 +384,33 @@ class DashboardClient:
         max_seconds: float = DEFAULT_LOG_SECONDS,
         max_lines: int = DEFAULT_LOG_LINES,
         on_line: Callable[[str], None] | None = None,
+        line_filter: LogFilter | None = None,
+        stop_event: asyncio.Event | None = None,
+        no_states: bool = False,
     ) -> CommandResult:
         """Capture a bounded window of live device logs for debugging.
 
-        Returns after ``max_seconds`` or ``max_lines``, whichever comes first
-        (``truncated`` will be ``True``). ``port`` may be ``"OTA"`` or a device
-        address such as ``192.168.1.50``.
+        Returns after ``max_seconds``, ``max_lines`` kept lines, or
+        ``stop_event`` (``truncated`` will be ``True``). ``port`` may be
+        ``"OTA"`` or a device address such as ``192.168.1.50``. Lines are
+        cleaned and filtered by ``line_filter`` (default: keep everything).
+        ``no_states`` is a Device Builder option the legacy endpoint lacks; it
+        is accepted for a uniform signature and ignored here.
         """
-        return await self._run_command(
-            "/logs",
-            {"type": "spawn", "configuration": configuration, "port": port},
-            max_seconds=max_seconds,
+
+        async def _stream(on_raw: Callable[[str], None]) -> CommandResult:
+            return await self._run_command(
+                "/logs",
+                {"type": "spawn", "configuration": configuration, "port": port},
+                max_seconds=max_seconds,
+                max_lines=_RAW_LOG_LINE_CAP,
+                on_line=on_raw,
+            )
+
+        return await async_capture(
+            _stream,
+            line_filter=line_filter,
             max_lines=max_lines,
             on_line=on_line,
+            stop_event=stop_event,
         )

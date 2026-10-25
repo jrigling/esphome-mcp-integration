@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "esphome-mcp-client"
-version = "0.4.0"
+version = "0.5.0"
 description = "Async client for the Home Assistant Supervisor and ESPHome dashboard / Device Builder API"
 readme = "README.md"
 license = "MIT"
@@ -41,6 +41,8 @@ device = [
     "aioesphomeapi>=24.0.0",
 ]
 dev = [
+    # Real request-builder tests for device-direct logs (tests/test_device_logs.py).
+    "aioesphomeapi>=24.0.0",
     "pytest>=7.0",
     "pytest-asyncio>=0.21.0",
     "pytest-cov>=4.0",

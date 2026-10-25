@@ -16,8 +16,10 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
-from .dashboard import CommandResult
+from .command import CommandResult
 from .exceptions import DeviceLogError
+from .log_capture import async_capture
+from .logtext import LEVELS, LogFilter
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -34,14 +36,26 @@ async def async_stream_device_logs(
     noise_psk: str | None = None,
     max_seconds: float = DEFAULT_LOG_SECONDS,
     max_lines: int = DEFAULT_LOG_LINES,
+    line_filter: LogFilter | None = None,
+    on_line: Callable[[str], None] | None = None,
+    stop_event: asyncio.Event | None = None,
     client_factory: Callable[[], Any] | None = None,
 ) -> CommandResult:
     """Capture a bounded window of a device's native-API logs.
 
-    Returns when ``max_seconds`` elapses or ``max_lines`` is reached, whichever
-    comes first (``truncated`` is then ``True``). ``client_factory`` exists for
-    testing; production builds an ``aioesphomeapi.APIClient``.
+    Returns when ``max_seconds`` elapses, ``max_lines`` lines have been kept,
+    or ``stop_event`` is set (``truncated`` is then ``True``).
+
+    The subscription asks the device for logs at ``line_filter.min_level``
+    (default: everything, very verbose). Leaving the level unset would send the
+    protocol default ``0``, which is ``LOG_LEVEL_NONE`` - the device would send
+    nothing. The device still caps it at the level its ``logger:`` was compiled
+    with. The startup config dump is requested only when the filter includes it.
+
+    ``client_factory`` exists for testing; production builds an
+    ``aioesphomeapi.APIClient``.
     """
+    flt = line_filter if line_filter is not None else LogFilter()
     if client_factory is None:
         try:
             from aioesphomeapi import APIClient
@@ -59,39 +73,43 @@ async def async_stream_device_logs(
                 client_info="esphome-mcp-client",
             )
 
-    result = CommandResult()
-    done = asyncio.Event()
-
-    def _on_log(msg: Any) -> None:
-        raw = getattr(msg, "message", b"")
-        if isinstance(raw, (bytes, bytearray)):
-            text = raw.decode("utf-8", "replace")
-        else:
-            text = str(raw)
-        result.lines.extend(text.splitlines() or [text])
-        if len(result.lines) >= max_lines:
-            result.truncated = True
-            done.set()
-
     client = client_factory()
-    unsubscribe: Callable[[], None] | None = None
-    try:
+
+    async def _stream(on_raw: Callable[[str], None]) -> CommandResult:
+        def _on_log(msg: Any) -> None:
+            raw = getattr(msg, "message", b"")
+            text = raw.decode("utf-8", "replace") if isinstance(raw, (bytes, bytearray)) else str(raw)
+            for line in text.splitlines() or [text]:
+                on_raw(line)
+
         await client.connect(login=True)
-        unsubscribe = client.subscribe_logs(_on_log)
+        unsubscribe = client.subscribe_logs(
+            _on_log,
+            log_level=min(flt.min_level, LEVELS["very_verbose"]),
+            dump_config=flt.include_config_dump,
+        )
         try:
-            await asyncio.wait_for(done.wait(), timeout=max_seconds)
-        except TimeoutError:
-            result.truncated = True
+            await asyncio.sleep(max_seconds)
+        finally:
+            try:
+                unsubscribe()
+            except Exception:  # noqa: BLE001 - best-effort cleanup  # pragma: no cover
+                pass
+        return CommandResult(truncated=True)
+
+    try:
+        result = await async_capture(
+            _stream,
+            line_filter=flt,
+            max_lines=max_lines,
+            on_line=on_line,
+            stop_event=stop_event,
+        )
     except DeviceLogError:
         raise
     except Exception as err:  # noqa: BLE001 - normalise any client failure
         raise DeviceLogError(f"device log stream for {address} failed: {err}") from err
     finally:
-        if unsubscribe is not None:
-            try:
-                unsubscribe()
-            except Exception:  # noqa: BLE001 - best-effort cleanup  # pragma: no cover
-                pass
         try:
             await client.disconnect()
         except Exception:  # noqa: BLE001 - best-effort cleanup  # pragma: no cover

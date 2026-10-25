@@ -7,7 +7,8 @@ integration (or any async aiohttp app).
 """
 from __future__ import annotations
 
-from .dashboard import CommandResult, DashboardClient
+from .command import CommandResult
+from .dashboard import DashboardClient
 from .device_logs import async_stream_device_logs
 from .exceptions import (
     AddonNotFoundError,
@@ -17,6 +18,8 @@ from .exceptions import (
     SupervisorError,
     WsUnavailableError,
 )
+from .logtext import LEVELS as LOG_LEVELS
+from .logtext import LogFilter
 from .supervisor import (
     AddonInfo,
     DashboardConnection,
@@ -25,7 +28,7 @@ from .supervisor import (
 )
 from .ws_client import WsClient
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 __all__ = [
     "AddonInfo",
@@ -37,6 +40,8 @@ __all__ = [
     "DashboardTarget",
     "DeviceLogError",
     "ESPHomeMCPError",
+    "LOG_LEVELS",
+    "LogFilter",
     "SupervisorClient",
     "SupervisorError",
     "WsClient",
