@@ -28,7 +28,7 @@ from .supervisor import (
 )
 from .ws_client import WsClient
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 __all__ = [
     "AddonInfo",
