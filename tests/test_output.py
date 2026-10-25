@@ -212,3 +212,26 @@ def test_clean_output_keeps_every_line_but_strips_ansi():
     assert cleaned.omitted == 0
     assert len(cleaned.lines) == len([line for line in VALIDATE_OK if line])
     assert not any("\\033" in line for line in cleaned.lines)
+
+
+def test_progress_bars_keep_only_the_finished_line():
+    # Shapes from a real first build on Device Builder 2026.10 (ESP-IDF download).
+    lines = ["INFO Downloading ESP-IDF 5.5.6 framework ..."]
+    lines += [f"Downloading: [{'=' * (i * 60 // 100):<60}] {i}%" for i in range(100)]
+    lines += [f"Downloading: [{'=' * 60}] 100% Done..."]
+    lines += [f"Extracting: [{'=' * (i * 60 // 100):<60}] {i}%" for i in range(0, 100, 7)]
+    lines += [f"Extracting: [{'=' * 60}] 100% Done..."]
+    lines += [f"Downloading ESP-IDF tools: [{'=' * 30:<60}] 53%"]
+    lines += ["Partition table binary generated. Contents:", "app0,app,ota_0,0x10000,1792K,"]
+    assert trim_build_output(lines).lines == [
+        "INFO Downloading ESP-IDF 5.5.6 framework ...",
+        f"Downloading: [{'=' * 60}] 100% Done...",
+        f"Extracting: [{'=' * 60}] 100% Done...",
+        "Partition table binary generated. Contents:",
+        "app0,app,ota_0,0x10000,1792K,",
+    ]
+
+
+def test_bracketed_percent_in_real_messages_is_not_a_progress_bar():
+    line = "decklights.bin binary size 0xbdd80 bytes. 0x102280 bytes (58%) free."
+    assert trim_build_output([line]).lines == [line]

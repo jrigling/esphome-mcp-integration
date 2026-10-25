@@ -37,6 +37,10 @@ _BUILD_NOISE = [
         r"^ - (framework|tool|toolchain)-",  # PlatformIO package list
     )
 ]
+# A text progress bar (``Downloading: [=====     ] 42%``). Device Builder turns
+# each redraw into its own line, so a toolchain download prints hundreds; only
+# the finished (100%) line is kept.
+_PROGRESS_BAR = re.compile(r"\[[=#>.\s-]*\]\s*(\d{1,3})%")
 # A compiler diagnostic: ``path:line:col: error: ...`` (also warning / note).
 _DIAGNOSTIC = re.compile(r":\d+(:\d+)?: (fatal error|error|warning|note): ")
 # The code excerpt GCC prints under a diagnostic: `` 12 |   foo();`` / ``    |   ^~~``.
@@ -119,8 +123,12 @@ def trim_build_output(lines: list[str], *, failed: bool = False) -> TrimmedOutpu
             kept.append(line)
             continue
         in_excerpt = False
-        if _cli_level(line) is None and any(p.match(line) for p in _BUILD_NOISE):
-            continue
+        if _cli_level(line) is None:
+            if any(p.match(line) for p in _BUILD_NOISE):
+                continue
+            bar = _PROGRESS_BAR.search(line)
+            if bar and bar.group(1) != "100":
+                continue
         kept.append(line)
     return TrimmedOutput(kept, len(cleaned) - len(kept))
 
