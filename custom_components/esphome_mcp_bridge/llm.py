@@ -42,6 +42,7 @@ from esphome_mcp_client import (
     WsUnavailableError,
     async_stream_device_logs,
 )
+from esphome_mcp_client.output import clean_output, trim_build_output, trim_validate_output
 
 from .const import (
     ALLOWED_EXTENSIONS,
@@ -54,6 +55,7 @@ from .const import (
     SECRET_KEY_PATTERN,
     SECRETS_FILE,
 )
+from .jobs import MAX_OUTPUT_LINES as MAX_JOB_OUTPUT_LINES
 from .jobs import Job, JobRegistry
 
 _LOGGER = logging.getLogger(__name__)
@@ -331,9 +333,49 @@ async def _async_build_client(
     return _BuildClient(ws, legacy), slug
 
 
-def _result_to_dict(slug: str, configuration: str, result: Any) -> dict[str, Any]:
-    """Normalize a CommandResult into a JSON-serializable tool response."""
-    return {
+# Commands whose output is trimmed (unless verbose), and how.
+_VALIDATE_KINDS = {"validate"}
+_BUILD_KINDS = {"compile", "upload", "run", "clean"}
+_VERBOSE = vol.Optional("verbose", default=False)
+
+
+def _trimmed_output(
+    kind: str, lines: list[str], exit_code: int | None, verbose: bool
+) -> tuple[str, int]:
+    """Output text for a command plus the number of lines left out.
+
+    ANSI codes are always stripped; ``verbose`` keeps every line.
+    """
+    if verbose:
+        trimmed = clean_output(lines)
+    elif kind in _VALIDATE_KINDS:
+        trimmed = trim_validate_output(lines)
+    else:
+        trimmed = trim_build_output(lines, failed=exit_code not in (0, None))
+    return trimmed.output, trimmed.omitted
+
+
+def _omitted_note(omitted: int) -> str:
+    return (
+        f"{omitted} lines of progress/config output were left out; pass "
+        "verbose=true for the full output."
+    )
+
+
+def _result_to_dict(
+    slug: str,
+    configuration: str,
+    result: Any,
+    *,
+    kind: str | None = None,
+    verbose: bool = False,
+) -> dict[str, Any]:
+    """Normalize a CommandResult into a JSON-serializable tool response.
+
+    With ``kind`` (a validate or build command) the output is trimmed to the
+    meaningful lines unless ``verbose``.
+    """
+    response = {
         "addon_slug": slug,
         "configuration": configuration,
         "success": result.success,
@@ -341,6 +383,13 @@ def _result_to_dict(slug: str, configuration: str, result: Any) -> dict[str, Any
         "truncated": result.truncated,
         "output": result.output,
     }
+    if kind is not None:
+        output, omitted = _trimmed_output(kind, result.lines, result.exit_code, verbose)
+        response["output"] = output
+        response["omitted_lines"] = omitted
+        if omitted:
+            response["note"] = _omitted_note(omitted)
+    return response
 
 
 def _esphome_credentials(hass: HomeAssistant) -> list[dict[str, Any]]:
@@ -766,6 +815,7 @@ class _BuildTool(llm.Tool):
     parameters = vol.Schema(
         {
             vol.Required("configuration"): str,
+            _VERBOSE: bool,
             _ADDON_SLUG: str,
         }
     )
@@ -789,7 +839,10 @@ class _BuildTool(llm.Tool):
             result = await getattr(client, self._method)(configuration)
         except ESPHomeMCPError as err:
             return {"error": str(err)}
-        return _result_to_dict(slug, configuration, result)
+        return _result_to_dict(
+            slug, configuration, result,
+            kind=self._method, verbose=bool(args.get("verbose")),
+        )
 
 
 class ValidateTool(_BuildTool):
@@ -798,8 +851,9 @@ class ValidateTool(_BuildTool):
     name = "esphome_validate"
     description = (
         "Validate an ESPHome configuration file without building it. Returns the "
-        "validator output and exit code (0 = valid). Run this after editing, "
-        "before compiling — it's much faster than a full compile."
+        "validator's warnings and errors and the exit code (0 = valid); the "
+        "resolved-config dump is left out unless verbose=true. Run this after "
+        "editing, before compiling — it's much faster than a full compile."
     )
     _method = "validate"
 
@@ -813,7 +867,9 @@ class CompileTool(_BuildTool):
         "and exit code (0 = success). Compilation runs to completion before the "
         "result is returned. For a slow first build (which downloads a toolchain "
         "and can exceed the client timeout), pass background=true to get a job_id "
-        "immediately, then poll esphome_job_status."
+        "immediately, then poll esphome_job_status. Build progress noise is left "
+        "out of the log (warnings, errors and results are kept); verbose=true "
+        "returns everything."
     )
     _method = "compile"
     _supports_background = True
@@ -821,6 +877,7 @@ class CompileTool(_BuildTool):
         {
             vol.Required("configuration"): str,
             vol.Optional("background", default=False): bool,
+            _VERBOSE: bool,
             _ADDON_SLUG: str,
         }
     )
@@ -846,6 +903,7 @@ class _FlashTool(llm.Tool):
             vol.Required("configuration"): str,
             vol.Optional("port", default="OTA"): str,
             vol.Optional("background", default=False): bool,
+            _VERBOSE: bool,
             _ADDON_SLUG: str,
         }
     )
@@ -870,7 +928,10 @@ class _FlashTool(llm.Tool):
             result = await getattr(client, self._method)(configuration, port)
         except ESPHomeMCPError as err:
             return {"error": str(err)}
-        response = _result_to_dict(slug, configuration, result)
+        response = _result_to_dict(
+            slug, configuration, result,
+            kind=self._method, verbose=bool(args.get("verbose")),
+        )
         response["port"] = port
         return response
 
@@ -1206,7 +1267,8 @@ class JobStatusTool(llm.Tool):
         "'error'), exit code, and the output captured so far. 'wait_seconds' "
         f"blocks until the job finishes, up to {JOB_STATUS_MAX_WAIT}s per call. "
         "stop=true ends a running log capture early and returns what it "
-        "collected."
+        "collected. Build output is trimmed to warnings, errors and results "
+        "unless verbose=true."
     )
     parameters = vol.Schema(
         {
@@ -1215,6 +1277,7 @@ class JobStatusTool(llm.Tool):
                 vol.Coerce(float), vol.Clamp(min=0, max=JOB_STATUS_MAX_WAIT)
             ),
             vol.Optional("stop", default=False): bool,
+            _VERBOSE: bool,
         }
     )
 
@@ -1243,7 +1306,16 @@ class JobStatusTool(llm.Tool):
         deadline = time.monotonic() + wait
         while not job.is_finished and time.monotonic() < deadline:
             await asyncio.sleep(min(0.5, max(0.05, deadline - time.monotonic())))
-        return job.to_dict()
+        response = job.to_dict()
+        if job.kind in _VALIDATE_KINDS | _BUILD_KINDS:
+            output, omitted = _trimmed_output(
+                job.kind, list(job.lines), job.exit_code, bool(args["verbose"])
+            )
+            response["output"] = "\n".join(output.splitlines()[-MAX_JOB_OUTPUT_LINES:])
+            response["omitted_lines"] = omitted
+            if omitted:
+                response["note"] = _omitted_note(omitted)
+        return response
 
 
 # --------------------------------------------------------------------------- #

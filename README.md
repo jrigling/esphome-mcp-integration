@@ -43,8 +43,8 @@ The `ESPHome Builder` LLM API exposes these tools:
 | `esphome_write_yaml` | Overwrite an existing config |
 | `esphome_patch_yaml` | Edit an existing config via exact-match `{old_string, new_string}` replacements, without resending the whole file |
 | `esphome_add_secret` | Insert a key into `secrets.yaml` — **insert-only, write-only** (never reads/returns values; errors if the key exists) |
-| `esphome_validate` | Validate a config without building |
-| `esphome_compile` | Compile firmware (runs to completion, returns log + exit code) |
+| `esphome_validate` | Validate a config without building (returns warnings/errors; the resolved-config dump is left out unless `verbose=true`) |
+| `esphome_compile` | Compile firmware (returns the trimmed log + exit code; `background=true` for slow builds) |
 | `esphome_upload` | Flash firmware to a device (`port` defaults to `OTA`) |
 | `esphome_run` | Compile **and** flash in one step (dashboard "Install") |
 | `esphome_logs` | Capture live device logs, filtered by level, tag and text — streams **directly from the device** (works on classic dashboard *and* Device Builder) when it's adopted in HA, else falls back to the dashboard. Up to 30 s directly, or in the background (see below) |
@@ -53,6 +53,17 @@ The `ESPHome Builder` LLM API exposes these tools:
 
 A typical agent flow: **list devices → read/create config → write → validate →
 compile → run → check logs**.
+
+### Build output
+
+Validate, compile, upload, run and clean return only the lines that matter:
+`esphome`'s own `INFO` / `WARNING` / `ERROR` lines, compiler diagnostics with
+their code excerpts, the whole `Failed config` section, and results such as the
+RAM/Flash summary. CMake and ninja progress, PlatformIO step lines, the size
+table and a successful validation's resolved-config dump are left out, and the
+response says how many lines (`omitted_lines`). When a build fails, its last 40
+lines are always kept as-is. Pass `verbose=true` (also on `esphome_job_status`)
+for the full output. ANSI colour codes are always stripped.
 
 ### Logs
 
