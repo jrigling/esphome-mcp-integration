@@ -41,14 +41,17 @@ from typing import Any
 import aiohttp
 from aiohttp import WSMsgType
 
+from .command import CommandResult
 from .dashboard import (
+    _RAW_LOG_LINE_CAP,
     DEFAULT_BUILD_TIMEOUT,
     DEFAULT_LOG_LINES,
     DEFAULT_LOG_SECONDS,
     DEFAULT_MAX_LINES,
-    CommandResult,
 )
 from .exceptions import DashboardError, WsUnavailableError
+from .log_capture import async_capture
+from .logtext import LogFilter
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -341,17 +344,35 @@ class WsClient:
         max_seconds: float = DEFAULT_LOG_SECONDS,
         max_lines: int = DEFAULT_LOG_LINES,
         on_line: Callable[[str], None] | None = None,
+        line_filter: LogFilter | None = None,
+        stop_event: asyncio.Event | None = None,
+        no_states: bool = False,
     ) -> CommandResult:
         """Capture a bounded window of live device logs.
 
-        A healthy device streams forever, so this returns after ``max_seconds``
-        or ``max_lines`` (``truncated`` will be ``True``); closing the socket
-        cancels the server-side stream.
+        A healthy device streams forever, so this returns after ``max_seconds``,
+        ``max_lines`` kept lines, or ``stop_event`` (``truncated`` will be
+        ``True``); closing the socket cancels the server-side stream. Lines are
+        cleaned and filtered by ``line_filter`` (default: keep everything).
+        ``no_states`` asks ``esphome logs`` not to print entity state changes.
         """
-        return await self._run_stream(
-            "devices/logs",
-            {"configuration": configuration, "port": port},
-            max_seconds=max_seconds,
+        args: dict[str, Any] = {"configuration": configuration, "port": port}
+        if no_states:
+            args["no_states"] = True
+
+        async def _stream(on_raw: Callable[[str], None]) -> CommandResult:
+            return await self._run_stream(
+                "devices/logs",
+                args,
+                max_seconds=max_seconds,
+                max_lines=_RAW_LOG_LINE_CAP,
+                on_line=on_raw,
+            )
+
+        return await async_capture(
+            _stream,
+            line_filter=line_filter,
             max_lines=max_lines,
             on_line=on_line,
+            stop_event=stop_event,
         )

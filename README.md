@@ -47,11 +47,37 @@ The `ESPHome Builder` LLM API exposes these tools:
 | `esphome_compile` | Compile firmware (runs to completion, returns log + exit code) |
 | `esphome_upload` | Flash firmware to a device (`port` defaults to `OTA`) |
 | `esphome_run` | Compile **and** flash in one step (dashboard "Install") |
-| `esphome_logs` | Capture a bounded window of live device logs — streams **directly from the device** (works on classic dashboard *and* Device Builder) when it's adopted in HA, else falls back to the dashboard |
+| `esphome_logs` | Capture live device logs, filtered by level, tag and text — streams **directly from the device** (works on classic dashboard *and* Device Builder) when it's adopted in HA, else falls back to the dashboard. Up to 30 s directly, or in the background (see below) |
 | `esphome_clean` | Remove cached build artifacts |
+| `esphome_job_status` | Poll a background compile/upload/run or log capture; `stop=true` ends a log capture early |
 
 A typical agent flow: **list devices → read/create config → write → validate →
 compile → run → check logs**.
+
+### Logs
+
+`esphome_logs` options:
+
+| Option | Meaning |
+|---|---|
+| `level` | Minimum severity: `error`, `warn`, `info`, `config`, `debug`, `verbose`, `very_verbose` (default). In device mode the device itself filters at this level |
+| `tags` / `exclude_tags` | Component tags to keep or drop, with `*` globs, e.g. `["race", "esp32_ble*"]` |
+| `search` | Case-insensitive text, or `/regex/` (`/regex/i` for case-insensitive) |
+| `context` | Lines kept before and after each `search` match (`--` separates groups) |
+| `include_config_dump` | Include the device's startup config dump (skipped by default) |
+| `no_states` | Dashboard mode: don't print entity state changes |
+| `max_lines` | Lines to keep **after** filtering (default 500), so a narrow filter can wait for matches |
+| `max_seconds` | Capture window. Capped at 30 s unless `background=true` (up to 600 s) |
+| `background` | Return a `job_id` at once and keep capturing; poll `esphome_job_status`, and pass `stop=true` once you've seen what you need |
+
+Responses report `lines_received`, `lines_returned`, the filters applied, and
+`ended_by` (`window`, `max_lines`, `stopped` or `closed`), plus a `note` when
+nothing came back.
+
+**Why 30 seconds:** proxies in front of Home Assistant (Nabu Casa remote access,
+reverse proxies) cut off requests at roughly 45 s with HTTP 502. Anything that
+would take longer — slow compiles, long log captures — should use
+`background=true`.
 
 Each build tool accepts an optional `addon_slug` to target a specific channel;
 omit it to use the default (stable preferred over beta over dev).

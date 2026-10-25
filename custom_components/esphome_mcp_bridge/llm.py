@@ -21,6 +21,7 @@ import re
 import stat
 import tempfile
 import time
+from collections.abc import Callable
 from typing import Any
 
 import voluptuous as vol
@@ -30,10 +31,12 @@ from homeassistant.helpers import llm
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from esphome_mcp_client import (
+    LOG_LEVELS,
     DashboardClient,
     DashboardTarget,
     DeviceLogError,
     ESPHomeMCPError,
+    LogFilter,
     SupervisorClient,
     WsClient,
     WsUnavailableError,
@@ -58,6 +61,16 @@ _LOGGER = logging.getLogger(__name__)
 # Reusable schema fragment: every build/inventory tool accepts an optional
 # add-on slug so the agent can target stable vs. beta vs. dev explicitly.
 _ADDON_SLUG = vol.Optional("addon_slug")
+
+# Proxies in front of Home Assistant (Nabu Casa, reverse proxies) cut off
+# requests at roughly 45 s with a 502, so a call that waits must stay under it.
+SYNC_LOG_MAX_SECONDS = 30
+JOB_STATUS_MAX_WAIT = 30
+JOB_STOP_GRACE_SECONDS = 5
+BACKGROUND_LOG_MAX_SECONDS = 600
+DEFAULT_LOG_LINES = 500
+MAX_LOG_LINES = 5000
+MAX_LOG_CONTEXT = 20
 
 
 # --------------------------------------------------------------------------- #
@@ -888,31 +901,221 @@ class RunTool(_FlashTool):
     _method = "run"
 
 
-class LogsTool(llm.Tool):
-    """Capture a bounded window of live device logs for debugging.
+def _make_log_filter(args: dict[str, Any]) -> LogFilter:
+    """Build a fresh LogFilter from validated esphome_logs arguments.
+
+    Raises ``re.error`` for an invalid ``/regex/`` search.
+    """
+    return LogFilter(
+        min_level=LOG_LEVELS[args.get("level") or "very_verbose"],
+        tags=list(args.get("tags") or []),
+        exclude_tags=list(args.get("exclude_tags") or []),
+        search=args.get("search") or None,
+        context=int(args.get("context") or 0),
+        include_config_dump=bool(args.get("include_config_dump", False)),
+    )
+
+
+def _log_response(
+    slug: str,
+    configuration: str,
+    result: Any,
+    flt: LogFilter,
+    max_seconds: float,
+    mode: str,
+) -> dict[str, Any]:
+    """Tool response for a finished capture, with filter stats and a hint when
+    nothing came back."""
+    # A log stream never exits on its own: a capture that ran out its window
+    # or line budget is a success, not a missing exit code.
+    if result.exit_code is None and result.truncated:
+        result.exit_code = 0
+    response = _result_to_dict(slug, configuration, result)
+    response["mode"] = mode
+    response["ended_by"] = result.end_reason
+    response.update(_log_stats(flt))
+    if not result.lines:
+        if flt.lines_received:
+            response["note"] = (
+                f"Received {flt.lines_received} log lines but none matched the "
+                "filters; loosen level/tags/search or set include_config_dump."
+            )
+        elif mode == "device":
+            response["note"] = (
+                f"The device sent no log lines in {max_seconds:g}s. It may be idle "
+                "(try a longer or background capture and trigger the behaviour), "
+                "or its logger: level may be set too low."
+            )
+        else:
+            response["note"] = f"No log lines were received in {max_seconds:g}s."
+    return response
+
+
+def _log_stats(flt: LogFilter) -> dict[str, Any]:
+    return {
+        "lines_received": flt.lines_received,
+        "lines_returned": flt.lines_returned,
+        "filters": flt.describe(),
+    }
+
+
+async def _capture_logs(
+    hass: HomeAssistant,
+    *,
+    configuration: str,
+    address: str | None,
+    addon_slug: str | None,
+    user_id: str | None,
+    max_seconds: float,
+    max_lines: int,
+    filter_args: dict[str, Any],
+    no_states: bool,
+    on_line: Callable[[str], None] | None = None,
+    stop_event: asyncio.Event | None = None,
+) -> dict[str, Any]:
+    """Capture a bounded, filtered window of device logs.
 
     Prefers streaming directly from the device's native API (works on both the
-    classic dashboard and the new Device Builder); falls back to the dashboard's
-    /logs endpoint (classic dashboard only).
+    classic dashboard and the new Device Builder); falls back to the dashboard
+    log stream. Returns the tool response (or ``{"error": ...}``).
     """
+    # Identify the device (name + address) from dashboard inventory.
+    name: str | None = None
+    dash_client: DashboardClient | None = None
+    slug: str | None = None
+    try:
+        dash_client, slug = await _async_dashboard(hass, addon_slug, user_id)
+        for dev in await dash_client.inventory():
+            if dev.get("configuration") == configuration:
+                name = dev.get("name")
+                address = address or dev.get("address")
+                break
+    except ESPHomeMCPError:
+        pass  # dashboard may be unreachable; device-direct can still work
+
+    # 1. Direct from the device (backend-independent) if it's adopted in HA.
+    device_error: str | None = None
+    creds = _match_device(_esphome_credentials(hass), name=name, address=address)
+    if creds:
+        host = address or creds["host"]
+        flt = _make_log_filter(filter_args)
+        try:
+            result = await async_stream_device_logs(
+                host,
+                port=creds["port"],
+                password=creds["password"],
+                noise_psk=creds["noise_psk"],
+                max_seconds=max_seconds,
+                max_lines=max_lines,
+                line_filter=flt,
+                on_line=on_line,
+                stop_event=stop_event,
+            )
+        except DeviceLogError as err:
+            device_error = str(err)
+        else:
+            response = _log_response(slug or "", configuration, result, flt, max_seconds, "device")
+            response["address"] = host
+            return response
+
+    # 2. Dashboard fallback: /ws devices/logs on the Device Builder, or the
+    #    legacy /logs spawn on a classic dashboard (handled by _BuildClient).
+    if dash_client is None:
+        return {
+            "error": device_error
+            or "No reachable ESPHome dashboard, and the device is not adopted "
+            "in Home Assistant for direct log streaming."
+        }
+    flt = _make_log_filter(filter_args)
+    try:
+        build_client, _ = await _async_build_client(hass, addon_slug, user_id)
+        result = await build_client.logs(
+            configuration,
+            "OTA",
+            max_seconds=max_seconds,
+            max_lines=max_lines,
+            line_filter=flt,
+            on_line=on_line,
+            stop_event=stop_event,
+            no_states=no_states,
+        )
+    except ESPHomeMCPError as err:
+        msg = str(err)
+        if device_error:
+            msg += f" | device-direct also failed: {device_error}"
+        elif not creds:
+            msg += (
+                " | tip: adopt this device in Home Assistant's ESPHome "
+                "integration to enable direct log streaming."
+            )
+        return {"error": msg}
+    return _log_response(slug or "", configuration, result, flt, max_seconds, "dashboard")
+
+
+async def _run_logs_job(hass: HomeAssistant, job: Job, capture_args: dict[str, Any]) -> None:
+    """Background driver for esphome_logs(background=true)."""
+    try:
+        response = await _capture_logs(
+            hass, **capture_args, on_line=job.lines.append, stop_event=job.stop_event
+        )
+        if "error" in response:
+            job.status = "error"
+            job.error = response["error"]
+        else:
+            job.exit_code = response["exit_code"]
+            job.status = "done"
+            job.details = {
+                key: response[key]
+                for key in (
+                    "mode", "address", "ended_by", "lines_received",
+                    "lines_returned", "filters", "note",
+                )
+                if key in response
+            }
+    except Exception as err:  # noqa: BLE001 - a job must always finish
+        job.status = "error"
+        job.error = str(err)
+    finally:
+        job.finished_at = time.time()
+
+
+class LogsTool(llm.Tool):
+    """Capture a bounded, filterable window of live device logs."""
 
     name = "esphome_logs"
     description = (
-        "Stream live logs from a running ESPHome device for debugging, capturing "
-        "a bounded window (default ~30s or 500 lines). If the device is adopted "
-        "in Home Assistant, logs are read directly from the device (works on both "
-        "the classic dashboard and the new Device Builder); otherwise it falls "
-        "back to the dashboard log endpoint. Optionally pass 'address' to target a "
-        "device IP/hostname. Returns captured log lines; 'truncated' is true if "
-        "the window limit was hit."
+        "Capture live logs from a running ESPHome device. Streams directly from "
+        "the device when it is adopted in Home Assistant, otherwise via the "
+        "dashboard. Filter with 'level' (minimum severity), 'tags' / "
+        "'exclude_tags' (component tags, '*' globs, e.g. ['race', "
+        "'esp32_ble*']), and 'search' (case-insensitive text, or /regex/), with "
+        "'context' lines around matches. The startup config dump is skipped "
+        "unless include_config_dump=true. A direct capture lasts at most "
+        f"{SYNC_LOG_MAX_SECONDS}s; for longer captures, or to capture while "
+        "something is triggered on the device, pass background=true, then poll "
+        "esphome_job_status (stop=true ends it early). 'max_lines' counts lines "
+        "kept after filtering."
     )
     parameters = vol.Schema(
         {
             vol.Required("configuration"): str,
             vol.Optional("address"): str,
-            vol.Optional("max_seconds", default=30): vol.All(
-                vol.Coerce(float), vol.Range(min=1, max=120)
+            vol.Optional("max_seconds", default=SYNC_LOG_MAX_SECONDS): vol.All(
+                vol.Coerce(float), vol.Range(min=1, max=BACKGROUND_LOG_MAX_SECONDS)
             ),
+            vol.Optional("max_lines", default=DEFAULT_LOG_LINES): vol.All(
+                vol.Coerce(int), vol.Range(min=1, max=MAX_LOG_LINES)
+            ),
+            vol.Optional("level"): vol.In(list(LOG_LEVELS)),
+            vol.Optional("tags"): [str],
+            vol.Optional("exclude_tags"): [str],
+            vol.Optional("search"): str,
+            vol.Optional("context", default=0): vol.All(
+                vol.Coerce(int), vol.Range(min=0, max=MAX_LOG_CONTEXT)
+            ),
+            vol.Optional("include_config_dump", default=False): bool,
+            vol.Optional("no_states", default=False): bool,
+            vol.Optional("background", default=False): bool,
             _ADDON_SLUG: str,
         }
     )
@@ -920,107 +1123,119 @@ class LogsTool(llm.Tool):
     async def async_call(
         self, hass: HomeAssistant, tool_input: llm.ToolInput, llm_context: llm.LLMContext
     ) -> dict[str, Any]:
-        args = tool_input.tool_args
+        try:
+            args = self.parameters(tool_input.tool_args)
+        except vol.Invalid as err:
+            return {"error": f"Invalid arguments: {err}"}
         try:
             configuration = _guard(args["configuration"], require_yaml=True)
         except ValueError as err:
             return {"error": str(err)}
-        max_seconds = args.get("max_seconds", 30)
-        address = args.get("address")
-        addon_slug = args.get("addon_slug")
-        user_id = _user_id(llm_context)
-
-        # Identify the device (name + address) from dashboard inventory.
-        name: str | None = None
-        dash_client: DashboardClient | None = None
-        slug: str | None = None
         try:
-            dash_client, slug = await _async_dashboard(hass, addon_slug, user_id)
-            for dev in await dash_client.inventory():
-                if dev.get("configuration") == configuration:
-                    name = dev.get("name")
-                    address = address or dev.get("address")
-                    break
-        except ESPHomeMCPError:
-            pass  # dashboard may be unreachable; device-direct can still work
+            _make_log_filter(args)
+        except re.error as err:
+            return {"error": f"Invalid search regex {args.get('search')!r}: {err}"}
 
-        # 1. Direct from the device (backend-independent) if it's adopted in HA.
-        device_error: str | None = None
-        creds = _match_device(_esphome_credentials(hass), name=name, address=address)
-        if creds:
-            host = address or creds["host"]
-            try:
-                result = await async_stream_device_logs(
-                    host,
-                    port=creds["port"],
-                    password=creds["password"],
-                    noise_psk=creds["noise_psk"],
-                    max_seconds=max_seconds,
-                )
-            except DeviceLogError as err:
-                device_error = str(err)
-            else:
-                response = _result_to_dict(slug or "", configuration, result)
-                response["mode"] = "device"
-                response["address"] = host
-                return response
+        background = bool(args.get("background"))
+        max_seconds = float(args.get("max_seconds", SYNC_LOG_MAX_SECONDS))
+        clamped_note: str | None = None
+        if not background and max_seconds > SYNC_LOG_MAX_SECONDS:
+            clamped_note = (
+                f"max_seconds was reduced from {max_seconds:g} to "
+                f"{SYNC_LOG_MAX_SECONDS}: longer calls can be cut off by a proxy "
+                "(HTTP 502). Use background=true for longer captures."
+            )
+            max_seconds = SYNC_LOG_MAX_SECONDS
 
-        # 2. Dashboard fallback: /ws devices/logs on the Device Builder, or the
-        #    legacy /logs spawn on a classic dashboard (handled by _BuildClient).
-        if dash_client is None:
-            return {
-                "error": device_error
-                or "No reachable ESPHome dashboard, and the device is not adopted "
-                "in Home Assistant for direct log streaming."
-            }
-        try:
-            build_client, _ = await _async_build_client(hass, addon_slug, user_id)
-            result = await build_client.logs(configuration, "OTA", max_seconds=max_seconds)
-        except ESPHomeMCPError as err:
-            msg = str(err)
-            if device_error:
-                msg += f" | device-direct also failed: {device_error}"
-            elif not creds:
-                msg += (
-                    " | tip: adopt this device in Home Assistant's ESPHome "
-                    "integration to enable direct log streaming."
-                )
-            return {"error": msg}
-        response = _result_to_dict(slug, configuration, result)
-        response["mode"] = "dashboard"
+        capture_args = {
+            "configuration": configuration,
+            "address": args.get("address"),
+            "addon_slug": args.get("addon_slug"),
+            "user_id": _user_id(llm_context),
+            "max_seconds": max_seconds,
+            "max_lines": int(args.get("max_lines", DEFAULT_LOG_LINES)),
+            "filter_args": {
+                key: args[key]
+                for key in ("level", "tags", "exclude_tags", "search", "context", "include_config_dump")
+                if key in args
+            },
+            "no_states": bool(args.get("no_states", False)),
+        }
+
+        if background:
+            job = _job_registry(hass).create(
+                "logs", configuration, args.get("addon_slug"), stoppable=True
+            )
+            hass.async_create_background_task(
+                _run_logs_job(hass, job, capture_args),
+                name=f"esphome_mcp_bridge_logs_{job.id}",
+            )
+            response = job.to_dict()
+            response["max_seconds"] = max_seconds
+            response["note"] = (
+                "Log capture started in the background. Trigger whatever you want "
+                "to observe, then poll esphome_job_status with this job_id "
+                "(wait_seconds to block briefly); pass stop=true to end the "
+                f"capture early. It ends on its own after {max_seconds:g}s or "
+                f"{capture_args['max_lines']} kept lines."
+            )
+            return response
+
+        response = await _capture_logs(hass, **capture_args)
+        if clamped_note:
+            response["note"] = (
+                f"{clamped_note} {response['note']}" if "note" in response else clamped_note
+            )
         return response
 
 
 class JobStatusTool(llm.Tool):
-    """Poll the status and output of a background build job."""
+    """Poll (or stop) a background job."""
 
     name = "esphome_job_status"
     description = (
-        "Check a background ESPHome job (compile/upload/run started with "
-        "background=true). Returns status ('running'/'done'/'error'), exit code, "
-        "and the build output captured so far. Optionally set 'wait_seconds' to "
-        "block until the job finishes (up to that many seconds) before returning."
+        "Check a background ESPHome job (compile/upload/run, or a log capture, "
+        "started with background=true). Returns status ('running'/'done'/"
+        "'error'), exit code, and the output captured so far. 'wait_seconds' "
+        f"blocks until the job finishes, up to {JOB_STATUS_MAX_WAIT}s per call. "
+        "stop=true ends a running log capture early and returns what it "
+        "collected."
     )
     parameters = vol.Schema(
         {
             vol.Required("job_id"): str,
             vol.Optional("wait_seconds", default=0): vol.All(
-                vol.Coerce(float), vol.Range(min=0, max=120)
+                vol.Coerce(float), vol.Clamp(min=0, max=JOB_STATUS_MAX_WAIT)
             ),
+            vol.Optional("stop", default=False): bool,
         }
     )
 
     async def async_call(
         self, hass: HomeAssistant, tool_input: llm.ToolInput, llm_context: llm.LLMContext
     ) -> dict[str, Any]:
-        job_id = tool_input.tool_args["job_id"]
+        try:
+            args = self.parameters(tool_input.tool_args)
+        except vol.Invalid as err:
+            return {"error": f"Invalid arguments: {err}"}
+        job_id = args["job_id"]
         job = _job_registry(hass).get(job_id)
         if job is None:
             return {"error": f"No job with id {job_id!r} (it may have expired)."}
-        wait = tool_input.tool_args.get("wait_seconds", 0)
+        wait = float(args["wait_seconds"])
+        if args["stop"]:
+            if not job.stoppable:
+                return {
+                    "error": f"Job {job_id} is a {job.kind} job; only log captures "
+                    "can be stopped early."
+                }
+            if job.stop_event is not None:
+                job.stop_event.set()
+            # Give the capture a moment to wind down and report its result.
+            wait = max(wait, JOB_STOP_GRACE_SECONDS)
         deadline = time.monotonic() + wait
         while not job.is_finished and time.monotonic() < deadline:
-            await asyncio.sleep(min(2.0, max(0.1, deadline - time.monotonic())))
+            await asyncio.sleep(min(0.5, max(0.05, deadline - time.monotonic())))
         return job.to_dict()
 
 
@@ -1036,9 +1251,12 @@ _API_PROMPT = (
     "create a config -> write changes -> validate -> compile -> run (flash) -> "
     "check logs. When scaffolding a new config, use esphome_add_secret to insert "
     "any referenced secrets (it never overwrites existing ones). Never read, "
-    "write, or build secrets.yaml directly. Compilation and "
-    "uploads run to completion before returning; log streaming returns a bounded "
-    "window. Prefer validating before compiling, and report exit codes and "
+    "write, or build secrets.yaml directly. Calls that wait are cut off by "
+    "proxies after about 45 seconds: run slow compiles/uploads with "
+    "background=true and poll esphome_job_status. esphome_logs captures at "
+    "most 30 seconds directly; use background=true to capture longer or while "
+    "the user triggers something, and narrow captures with level, tags and "
+    "search. Prefer validating before compiling, and report exit codes and "
     "relevant log lines back to the user. Prefer esphome_patch_yaml over "
     "esphome_write_yaml when making small, targeted edits to a file that "
     "already exists - it avoids resending the entire file's contents. Use "
